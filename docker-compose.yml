@@ -1,0 +1,39 @@
+services:
+  poolsync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: poolmath-labcom-sync:latest
+    container_name: poolmath-labcom-sync
+    restart: unless-stopped
+    # Values come from .env locally, or from the stack's environment variables in Portainer.
+    environment:
+      POOLSYNC_LabCom__ApiToken: ${POOLSYNC_LabCom__ApiToken:-}
+      POOLSYNC_PoolMath__Username: ${POOLSYNC_PoolMath__Username:-}
+      POOLSYNC_PoolMath__Password: ${POOLSYNC_PoolMath__Password:-}
+      POOLSYNC_PoolMath__UserId: ${POOLSYNC_PoolMath__UserId:-}
+      POOLSYNC_PoolMath__AuthToken: ${POOLSYNC_PoolMath__AuthToken:-}
+      POOLSYNC_Sync__DryRun: ${POOLSYNC_Sync__DryRun:-true}
+      POOLSYNC_Sync__Interval: ${POOLSYNC_Sync__Interval:-00:15:00}
+      POOLSYNC_Sync__InitialBackfill: ${POOLSYNC_Sync__InitialBackfill:-7.00:00:00}
+      POOLSYNC_WaterBodies__0__Name: ${POOLSYNC_WaterBodies__0__Name:-Water Body 1}
+      POOLSYNC_WaterBodies__0__LabComAccountId: ${POOLSYNC_WaterBodies__0__LabComAccountId:-}
+      POOLSYNC_WaterBodies__0__PoolMathPoolId: ${POOLSYNC_WaterBodies__0__PoolMathPoolId:-}
+      POOLSYNC_WaterBodies__1__Name: ${POOLSYNC_WaterBodies__1__Name:-Water Body 2}
+      POOLSYNC_WaterBodies__1__LabComAccountId: ${POOLSYNC_WaterBodies__1__LabComAccountId:-}
+      POOLSYNC_WaterBodies__1__PoolMathPoolId: ${POOLSYNC_WaterBodies__1__PoolMathPoolId:-}
+      POOLSYNC_WaterBodies__2__Name: ${POOLSYNC_WaterBodies__2__Name:-Water Body 3}
+      POOLSYNC_WaterBodies__2__LabComAccountId: ${POOLSYNC_WaterBodies__2__LabComAccountId:-}
+      POOLSYNC_WaterBodies__2__PoolMathPoolId: ${POOLSYNC_WaterBodies__2__PoolMathPoolId:-}
+    ports:
+      - "8080:8080"
+    volumes:
+      - poolsync-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  poolsync-data:

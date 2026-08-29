@@ -1,0 +1,173 @@
+using Microsoft.Extensions.Options;
+using PoolSync.Configuration;
+using PoolSync.LabCom;
+using PoolSync.PoolMath;
+using PoolSync.State;
+
+namespace PoolSync.Sync;
+
+/// <summary>Polls LabCOM on an interval and writes any settled test sessions to Pool Math.</summary>
+public sealed class SyncWorker(
+    IServiceScopeFactory scopeFactory,
+    IOptions<SyncOptions> syncOptions,
+    IOptions<List<WaterBodyOptions>> waterBodies,
+    SyncStatus status,
+    ILogger<SyncWorker> logger) : BackgroundService
+{
+    private readonly SyncOptions _sync = syncOptions.Value;
+    private readonly List<WaterBodyOptions> _waterBodies = waterBodies.Value;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        logger.LogInformation(
+            "Starting sync for {Count} water body/bodies every {Interval}. Dry run: {DryRun}.",
+            _waterBodies.Count(w => w.Enabled),
+            _sync.Interval,
+            _sync.DryRun);
+
+        using var timer = new PeriodicTimer(_sync.Interval);
+
+        do
+        {
+            try
+            {
+                await RunOnceAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                // Keep the loop alive: LabCOM and Pool Math both have transient outages, and the
+                // high-water mark means a failed run simply retries the same readings next tick.
+                status.RunFailed(ex);
+                logger.LogError(ex, "Sync run failed; retrying in {Interval}.", _sync.Interval);
+            }
+        }
+        while (await timer.WaitForNextTickAsync(stoppingToken));
+    }
+
+    private async Task RunOnceAsync(CancellationToken ct)
+    {
+        status.RunStarted();
+
+        using var scope = scopeFactory.CreateScope();
+        var labCom = scope.ServiceProvider.GetRequiredService<LabComClient>();
+        var poolMath = scope.ServiceProvider.GetRequiredService<IPoolMathClient>();
+        var mapper = scope.ServiceProvider.GetRequiredService<ReadingMapper>();
+        var store = scope.ServiceProvider.GetRequiredService<ISyncStateStore>();
+
+        var state = await store.LoadAsync(ct);
+        var cloudAccount = await labCom.GetCloudAccountAsync(ct);
+        var now = DateTimeOffset.UtcNow;
+
+        foreach (var waterBody in _waterBodies.Where(w => w.Enabled))
+        {
+            await SyncWaterBodyAsync(waterBody, cloudAccount, state, mapper, poolMath, now, ct);
+        }
+
+        await store.SaveAsync(state, ct);
+        status.RunSucceeded();
+    }
+
+    private async Task SyncWaterBodyAsync(
+        WaterBodyOptions waterBody,
+        CloudAccount cloudAccount,
+        SyncState state,
+        ReadingMapper mapper,
+        IPoolMathClient poolMath,
+        DateTimeOffset now,
+        CancellationToken ct)
+    {
+        var account = cloudAccount.Accounts.FirstOrDefault(
+            a => a.Id.ToString() == waterBody.LabComAccountId);
+
+        if (account is null)
+        {
+            logger.LogWarning(
+                "No LabCOM account {AccountId} for water body {Name}. Available: {Available}.",
+                waterBody.LabComAccountId,
+                waterBody.Name,
+                string.Join(", ", cloudAccount.Accounts.Select(a => $"{a.Id} ({a.DisplayName})")));
+            return;
+        }
+
+        var bodyState = state.For(waterBody.LabComAccountId);
+
+        // The first run has no high-water mark, so the backfill window bounds the import instead.
+        DateTimeOffset? cutoff = bodyState.LastMeasurementId == 0
+            ? now - _sync.InitialBackfill
+            : null;
+
+        var candidates = account.Measurements
+            .Where(m => m.Id > bodyState.LastMeasurementId)
+            .Where(m => cutoff is null || m.Timestamp >= cutoff)
+            .ToList();
+
+        if (candidates.Count == 0)
+        {
+            logger.LogDebug("{Name}: no new LabCOM measurements.", waterBody.Name);
+            status.RecordWaterBody(waterBody.Name, 0, bodyState.LastSessionTimestamp);
+            return;
+        }
+
+        // A session still in progress would otherwise be split across two Pool Math logs.
+        var sessions = mapper.GroupIntoSessions(candidates)
+            .Where(s => now - s.Timestamp >= _sync.SessionSettleTime)
+            .OrderBy(s => s.Timestamp)
+            .ToList();
+
+        if (sessions.Count == 0)
+        {
+            logger.LogInformation(
+                "{Name}: {Count} new measurement(s) still settling; leaving them for the next run.",
+                waterBody.Name,
+                candidates.Count);
+            status.RecordWaterBody(waterBody.Name, 0, bodyState.LastSessionTimestamp);
+            return;
+        }
+
+        var logs = new List<PoolMathTestLog>();
+        foreach (var session in sessions)
+        {
+            var log = mapper.ToTestLog(session, waterBody);
+            if (log is null)
+            {
+                logger.LogInformation(
+                    "{Name}: session at {Timestamp} had no readings Pool Math tracks; skipping it.",
+                    waterBody.Name,
+                    session.Timestamp);
+                continue;
+            }
+
+            logs.Add(log);
+        }
+
+        if (logs.Count > 0)
+        {
+            await poolMath.PushTestLogsAsync(logs, ct);
+        }
+
+        // Advance past every settled session, including ones that produced no log, so unmapped
+        // readings aren't re-examined forever.
+        bodyState.LastMeasurementId = sessions.Max(s => s.MaxMeasurementId);
+        bodyState.LastSessionTimestamp = sessions.Max(s => s.Timestamp);
+        bodyState.LastSyncedAt = now;
+        bodyState.SessionsWritten += logs.Count;
+
+        foreach (var log in logs.Where(l => l.Id is not null))
+        {
+            bodyState.RecordLog(log.Id!);
+        }
+
+        logger.LogInformation(
+            "{Name}: wrote {LogCount} test log(s) from {SessionCount} session(s); high-water mark now {Id}.",
+            waterBody.Name,
+            logs.Count,
+            sessions.Count,
+            bodyState.LastMeasurementId);
+
+        status.RecordWaterBody(waterBody.Name, logs.Count, bodyState.LastSessionTimestamp);
+    }
+}

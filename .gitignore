@@ -1,0 +1,11 @@
+bin/
+obj/
+.vs/
+.idea/
+*.user
+.env
+.DS_Store
+
+# Contains live session credentials - never commit
+*.har
+Properties/launchSettings.json
