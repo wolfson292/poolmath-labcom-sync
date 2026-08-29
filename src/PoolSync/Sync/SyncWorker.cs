@@ -67,7 +67,13 @@ public sealed class SyncWorker(
             await SyncWaterBodyAsync(waterBody, cloudAccount, state, mapper, poolMath, now, ct);
         }
 
-        await store.SaveAsync(state, ct);
+        // A dry run has to stay side-effect free. Persisting the high-water mark here would mean
+        // that switching to live silently skipped every session the dry run had already "written".
+        if (!_sync.DryRun)
+        {
+            await store.SaveAsync(state, ct);
+        }
+
         status.RunSucceeded();
     }
 

@@ -96,6 +96,9 @@ docker compose logs -f
 Check the values and timestamps against what the LabCOM app shows. When it looks right, set
 `POOLSYNC_Sync__DryRun=false` in `.env` and `docker compose up -d` again.
 
+A dry run is side-effect free: it does not advance the high-water mark, so every session it reports
+is still written once you go live, and repeated dry runs keep showing the same output.
+
 > On the first real run the service imports the last 7 days (`InitialBackfill`). Shorten it to
 > `1.00:00:00` first if you'd rather start small.
 
