@@ -26,7 +26,8 @@ services:
       POOLSYNC_WaterBodies__2__LabComAccountId: ${POOLSYNC_WaterBodies__2__LabComAccountId:-}
       POOLSYNC_WaterBodies__2__PoolMathPoolId: ${POOLSYNC_WaterBodies__2__PoolMathPoolId:-}
     ports:
-      - "8080:8080"
+      # Host port is configurable; the container always listens on 8080.
+      - "${POOLSYNC_HTTP_PORT:-8080}:8080"
     volumes:
       - poolsync-data:/data
     logging:

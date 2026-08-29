@@ -14,6 +14,20 @@ public sealed class ReadingMapper(
     private readonly MappingOptions _mapping = mappingOptions.Value;
     private readonly SyncOptions _sync = syncOptions.Value;
 
+    // LabCOM is inconsistent about dashes in scenario ids: "19-PH" uses a hyphen while "12-CYA"
+    // uses an en dash. Normalising both sides means config can be written with plain hyphens,
+    // which also keeps these settable from environment variables.
+    private readonly Lazy<Dictionary<string, string>> _scenarioLookup = new(() =>
+    {
+        var lookup = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (scenario, field) in mappingOptions.Value.ByScenario)
+        {
+            lookup[NormaliseDashes(scenario)] = field;
+        }
+
+        return lookup;
+    });
+
     /// <summary>
     /// Clusters measurements into test runs. A PoolLab records one measurement per parameter over
     /// several minutes, so readings chain together while consecutive gaps stay inside the window.
@@ -116,7 +130,7 @@ public sealed class ReadingMapper(
     private string? ResolveField(LabComMeasurement measurement)
     {
         if (!string.IsNullOrWhiteSpace(measurement.Scenario)
-            && _mapping.ByScenario.TryGetValue(measurement.Scenario, out var byScenario))
+            && _scenarioLookup.Value.TryGetValue(NormaliseDashes(measurement.Scenario!), out var byScenario))
         {
             return Validate(byScenario);
         }
@@ -151,6 +165,9 @@ public sealed class ReadingMapper(
         return _mapping.NoteTemplate.Replace(
             "{device}", session.DeviceSerial ?? "PoolLab", StringComparison.Ordinal);
     }
+
+    private static string NormaliseDashes(string value) =>
+        value.Replace('\u2013', '-').Replace('\u2014', '-');
 
     private static double? Value(Dictionary<string, double> values, string field) =>
         values.TryGetValue(field, out var value) ? value : null;

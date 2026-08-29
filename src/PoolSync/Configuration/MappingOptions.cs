@@ -8,12 +8,20 @@ public sealed class MappingOptions
 {
     public const string SectionName = "Mapping";
 
-    /// <summary>LabCOM scenario id (e.g. "429-pH-PoolLab") to Pool Math field.</summary>
+    /// <summary>
+    /// LabCOM scenario id to Pool Math field, tried before the parameter name.
+    ///
+    /// Only unambiguous scenarios belong here. A PoolLab reports free, total and combined chlorine
+    /// under a single "8-CL" scenario, so chlorine has to be resolved by parameter name instead;
+    /// mapping that scenario would collapse all three readings onto one field. The catch-all
+    /// "manually added" scenario is excluded for the same reason.
+    /// </summary>
     public Dictionary<string, string> ByScenario { get; set; } = new(StringComparer.OrdinalIgnoreCase)
     {
+        ["19-PH"] = PoolMathFields.Ph,
+        ["2-TA"] = PoolMathFields.TotalAlkalinity,
+        ["12-CYA"] = PoolMathFields.CyanuricAcid,
         ["429-pH-PoolLab"] = PoolMathFields.Ph,
-        ["428-Chlorine-Free"] = PoolMathFields.FreeChlorine,
-        ["421-Chlorine-Total"] = PoolMathFields.TotalChlorine,
         ["430-Total-Alkalinity"] = PoolMathFields.TotalAlkalinity,
         ["431-Cyanuric-Acid"] = PoolMathFields.CyanuricAcid,
     };
@@ -27,6 +35,8 @@ public sealed class MappingOptions
         ["Chlorine free"] = PoolMathFields.FreeChlorine,
         ["PL Chlorine Total"] = PoolMathFields.TotalChlorine,
         ["Chlorine total"] = PoolMathFields.TotalChlorine,
+        ["PL Chlorine Combined"] = PoolMathFields.CombinedChlorine,
+        ["PL Alkalinity"] = PoolMathFields.TotalAlkalinity,
         ["PL T-Alka"] = PoolMathFields.TotalAlkalinity,
         ["Alkalinity-M"] = PoolMathFields.TotalAlkalinity,
         ["PL Cyanuric Acid"] = PoolMathFields.CyanuricAcid,
