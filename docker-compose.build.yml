@@ -1,0 +1,8 @@
+# Overlay for building the image locally instead of pulling it.
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  poolsync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: poolmath-labcom-sync:local

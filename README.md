@@ -99,15 +99,25 @@ Check the values and timestamps against what the LabCOM app shows. When it looks
 > On the first real run the service imports the last 7 days (`InitialBackfill`). Shorten it to
 > `1.00:00:00` first if you'd rather start small.
 
-## Deploying to the NUC
+## Deploying
 
-Building on an Apple Silicon Mac targets arm64 by default; the NUC needs amd64:
+The image is built for `linux/amd64` by [GitHub Actions](.github/workflows/build-image.yml) on every
+push to `main` and published to `ghcr.io/<owner>/poolmath-labcom-sync:latest`.
+[docker-compose.yml](docker-compose.yml) pulls that image, so the target host needs no .NET SDK and
+no build step. Point `POOLSYNC_IMAGE` elsewhere to use a different registry or tag.
+
+As a Portainer stack, add it as a Git-backed stack pointing at this repo with
+`docker-compose.yml` as the compose path, and set the variables from `.env.example` as stack
+environment variables.
+
+> Deploying with a `build:` section through a Portainer *agent* fails on some setups — the agent
+> can't reach BuildKit (`failed to list workers`). Pulling a prebuilt image avoids that entirely.
+
+To build locally instead of pulling:
 
 ```bash
-docker buildx build --platform linux/amd64 -t poolmath-labcom-sync:latest --load .
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
-
-Or just build on the NUC itself with `docker compose up -d --build`.
 
 ## Endpoints
 

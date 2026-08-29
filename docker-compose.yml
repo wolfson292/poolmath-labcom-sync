@@ -1,9 +1,9 @@
 services:
   poolsync:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: poolmath-labcom-sync:latest
+    # Built and published by .github/workflows/build-image.yml.
+    # To build locally instead:
+    #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+    image: ${POOLSYNC_IMAGE:-ghcr.io/wolfson292/poolmath-labcom-sync:latest}
     container_name: poolmath-labcom-sync
     restart: unless-stopped
     # Values come from .env locally, or from the stack's environment variables in Portainer.
