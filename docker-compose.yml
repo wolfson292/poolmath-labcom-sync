@@ -16,6 +16,11 @@ services:
       POOLSYNC_Sync__DryRun: ${POOLSYNC_Sync__DryRun:-true}
       POOLSYNC_Sync__Interval: ${POOLSYNC_Sync__Interval:-00:15:00}
       POOLSYNC_Sync__InitialBackfill: ${POOLSYNC_Sync__InitialBackfill:-7.00:00:00}
+      POOLSYNC_Sync__SessionWindow: ${POOLSYNC_Sync__SessionWindow:-00:20:00}
+      POOLSYNC_Sync__SessionSettleTime: ${POOLSYNC_Sync__SessionSettleTime:-00:10:00}
+      # 0 = Fahrenheit, 1 = Celsius. A PoolLab reports Celsius.
+      POOLSYNC_Mapping__WaterTempUnits: ${POOLSYNC_Mapping__WaterTempUnits:-1}
+      POOLSYNC_Mapping__NoteTemplate: ${POOLSYNC_Mapping__NoteTemplate:-}
       POOLSYNC_WaterBodies__0__Name: ${POOLSYNC_WaterBodies__0__Name:-Water Body 1}
       POOLSYNC_WaterBodies__0__LabComAccountId: ${POOLSYNC_WaterBodies__0__LabComAccountId:-}
       POOLSYNC_WaterBodies__0__PoolMathPoolId: ${POOLSYNC_WaterBodies__0__PoolMathPoolId:-}

@@ -118,7 +118,9 @@ Or just build on the NUC itself with `docker compose up -d --build`.
 
 ## Configuration
 
-Everything is settable as `POOLSYNC_Section__Key` environment variables.
+Everything is settable as `POOLSYNC_Section__Key` environment variables. Note that
+[docker-compose.yml](docker-compose.yml) passes an explicit list of these through to the container —
+to override a setting it doesn't already list, add it there too.
 
 | Setting                    | Default        | Notes                                            |
 | -------------------------- | -------------- | ------------------------------------------------ |
