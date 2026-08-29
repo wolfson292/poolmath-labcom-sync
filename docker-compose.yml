@@ -14,6 +14,9 @@ services:
       POOLSYNC_PoolMath__UserId: ${POOLSYNC_PoolMath__UserId:-}
       POOLSYNC_PoolMath__AuthToken: ${POOLSYNC_PoolMath__AuthToken:-}
       POOLSYNC_Sync__DryRun: ${POOLSYNC_Sync__DryRun:-true}
+      # Point this at a new filename to restart from the backfill window without
+      # needing shell access to delete the existing state file.
+      POOLSYNC_Sync__StatePath: ${POOLSYNC_Sync__StatePath:-/data/state.json}
       POOLSYNC_Sync__Interval: ${POOLSYNC_Sync__Interval:-00:15:00}
       POOLSYNC_Sync__InitialBackfill: ${POOLSYNC_Sync__InitialBackfill:-7.00:00:00}
       POOLSYNC_Sync__SessionWindow: ${POOLSYNC_Sync__SessionWindow:-00:20:00}

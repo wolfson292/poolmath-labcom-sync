@@ -178,6 +178,8 @@ Copy the right one into `.env`.
 **A session was written with missing parameters** — raise `Sync:SessionSettleTime` so slower runs
 finish before the session is pushed.
 
-**Re-import after a mistake** — stop the container, edit or delete `/data/state.json`, restart.
+**Re-import after a mistake** — without host shell access, point `Sync:StatePath` at a new filename
+and redeploy; the service finds no state there and restarts from the backfill window. With shell
+access, stop the container, edit or delete `/data/state.json`, restart.
 Lowering `LastMeasurementId` re-imports everything above it, which will create duplicate Pool Math
 entries; delete those in the app.
