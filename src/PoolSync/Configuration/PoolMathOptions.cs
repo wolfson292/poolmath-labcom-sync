@@ -40,4 +40,10 @@ public sealed class PoolMathOptions
     public string TestLogRoute { get; set; } = "testlogs";
 
     public string PoolsListRoute { get; set; } = "pools/list";
+
+    /// <summary>
+    /// Public share page for a pool; "{code}" is replaced with the pool's share code. Settable so a
+    /// change to Pool Math's share URLs doesn't need a rebuild.
+    /// </summary>
+    public string ShareUrlTemplate { get; set; } = "https://api.poolmathapp.com/share/{code}";
 }

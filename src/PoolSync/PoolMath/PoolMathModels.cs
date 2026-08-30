@@ -117,6 +117,29 @@ public sealed class PoolMathPool
 
     [JsonPropertyName("deleted")]
     public bool Deleted { get; set; }
+
+    /// <summary>Per-pool share code, set when sharing by link is enabled for this pool.</summary>
+    [JsonPropertyName("shareCode")]
+    public string? ShareCode { get; set; }
+
+    [JsonPropertyName("shareWithCode")]
+    public bool ShareWithCode { get; set; }
+
+    /// <summary>The older "share with Trouble Free Pool" setting, keyed on the account id.</summary>
+    [JsonPropertyName("shareWithTfp")]
+    public bool ShareWithTfp { get; set; }
+
+    [JsonPropertyName("userId")]
+    public string? UserId { get; set; }
+
+    /// <summary>
+    /// The code that addresses this pool's public share page, or null when sharing is off. Pool
+    /// Math offers two mechanisms; the per-pool code wins because it points at this pool alone.
+    /// </summary>
+    public string? ShareCodeOrNull =>
+        ShareWithCode && !string.IsNullOrWhiteSpace(ShareCode) ? ShareCode
+        : ShareWithTfp && !string.IsNullOrWhiteSpace(UserId) ? UserId
+        : null;
 }
 
 /// <summary>Paged list envelope used by /pools/list and /timeline/list.</summary>

@@ -24,11 +24,13 @@ public sealed record SyncRunResult(string Outcome, int LogsWritten, string? Erro
 public sealed class SyncRunner(
     IServiceScopeFactory scopeFactory,
     IOptions<SyncOptions> syncOptions,
+    IOptions<PoolMathOptions> poolMathOptions,
     IOptions<List<WaterBodyOptions>> waterBodies,
     SyncStatus status,
     ILogger<SyncRunner> logger)
 {
     private readonly SyncOptions _sync = syncOptions.Value;
+    private readonly PoolMathOptions _poolMath = poolMathOptions.Value;
     private readonly List<WaterBodyOptions> _waterBodies = waterBodies.Value;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
@@ -114,19 +116,26 @@ public sealed class SyncRunner(
         var now = DateTimeOffset.UtcNow;
 
         var enabled = _waterBodies.Where(w => w.Enabled).ToList();
+        var shareUrls = await ShareUrlsAsync(poolMath, ct);
         var written = 0;
 
-        foreach (var waterBody in enabled)
+        try
         {
-            written += await SyncWaterBodyAsync(
-                waterBody, cloudAccount, state, mapper, poolMath, now, ct);
+            foreach (var waterBody in enabled)
+            {
+                written += await SyncWaterBodyAsync(
+                    waterBody, cloudAccount, state, mapper, poolMath, shareUrls, now, ct);
+            }
         }
-
-        // A dry run has to stay side-effect free. Persisting the high-water mark here would mean
-        // that switching to live silently skipped every session the dry run had already "written".
-        if (!_sync.DryRun)
+        finally
         {
-            await store.SaveAsync(state, ct);
+            // Save even when a water body threw, so sessions already written to Pool Math are not
+            // written again on the next run. Not passing ct: progress must be persisted even when
+            // the run is being cancelled, and this is a small local file.
+            if (!_sync.DryRun)
+            {
+                await store.SaveAsync(state, CancellationToken.None);
+            }
         }
 
         // A quiet run is the normal case, so say so explicitly: without this the logs are silent
@@ -147,9 +156,12 @@ public sealed class SyncRunner(
         SyncState state,
         ReadingMapper mapper,
         IPoolMathClient poolMath,
+        IReadOnlyDictionary<string, string> shareUrls,
         DateTimeOffset now,
         CancellationToken ct)
     {
+        var shareUrl = shareUrls.GetValueOrDefault(waterBody.PoolMathPoolId);
+
         var account = cloudAccount.Accounts.FirstOrDefault(
             a => a.Id.ToString() == waterBody.LabComAccountId);
 
@@ -160,7 +172,7 @@ public sealed class SyncRunner(
                 waterBody.LabComAccountId,
                 waterBody.Name,
                 string.Join(", ", cloudAccount.Accounts.Select(a => $"{a.Id} ({a.DisplayName})")));
-            status.RecordWaterBody(waterBody.Name, 0, null, null);
+            status.RecordWaterBody(waterBody.Name, 0, null, null, shareUrl);
             return 0;
         }
 
@@ -183,7 +195,7 @@ public sealed class SyncRunner(
         if (candidates.Count == 0)
         {
             logger.LogDebug("{Name}: no new LabCOM measurements.", waterBody.Name);
-            status.RecordWaterBody(waterBody.Name, 0, bodyState.LastSessionTimestamp, latest);
+            status.RecordWaterBody(waterBody.Name, 0, bodyState.LastSessionTimestamp, latest, shareUrl);
             return 0;
         }
 
@@ -199,53 +211,83 @@ public sealed class SyncRunner(
                 "{Name}: {Count} new measurement(s) still settling; leaving them for the next run.",
                 waterBody.Name,
                 candidates.Count);
-            status.RecordWaterBody(waterBody.Name, 0, bodyState.LastSessionTimestamp, latest);
+            status.RecordWaterBody(waterBody.Name, 0, bodyState.LastSessionTimestamp, latest, shareUrl);
             return 0;
         }
 
-        var logs = new List<PoolMathTestLog>();
+        var written = 0;
+
+        // One session at a time, advancing the high-water mark after each. Writing a whole batch
+        // before advancing would mean a failure partway through left logs in Pool Math that the
+        // next run wrote again, because the mark had not moved past them.
         foreach (var session in sessions)
         {
             var log = mapper.ToTestLog(session, waterBody);
+
             if (log is null)
             {
                 logger.LogInformation(
                     "{Name}: session at {Timestamp} had no readings Pool Math tracks; skipping it.",
                     waterBody.Name,
                     session.Timestamp);
-                continue;
+            }
+            else
+            {
+                await poolMath.PushTestLogsAsync([log], ct);
+                written++;
+
+                if (log.Id is not null)
+                {
+                    bodyState.RecordLog(log.Id);
+                }
             }
 
-            logs.Add(log);
+            // Advance past sessions that produced no log too, so unmapped readings aren't
+            // re-examined forever.
+            bodyState.LastMeasurementId = session.MaxMeasurementId;
+            bodyState.LastSessionTimestamp = session.Timestamp;
+            bodyState.LastSyncedAt = now;
         }
 
-        if (logs.Count > 0)
-        {
-            await poolMath.PushTestLogsAsync(logs, ct);
-        }
-
-        // Advance past every settled session, including ones that produced no log, so unmapped
-        // readings aren't re-examined forever.
-        bodyState.LastMeasurementId = sessions.Max(s => s.MaxMeasurementId);
-        bodyState.LastSessionTimestamp = sessions.Max(s => s.Timestamp);
-        bodyState.LastSyncedAt = now;
-        bodyState.SessionsWritten += logs.Count;
-
-        foreach (var log in logs.Where(l => l.Id is not null))
-        {
-            bodyState.RecordLog(log.Id!);
-        }
+        bodyState.SessionsWritten += written;
 
         logger.LogInformation(
             "{Name}: wrote {LogCount} test log(s) from {SessionCount} session(s); high-water mark now {Id}.",
             waterBody.Name,
-            logs.Count,
+            written,
             sessions.Count,
             bodyState.LastMeasurementId);
 
-        status.RecordWaterBody(waterBody.Name, logs.Count, bodyState.LastSessionTimestamp, latest);
+        status.RecordWaterBody(waterBody.Name, written, bodyState.LastSessionTimestamp, latest, shareUrl);
 
-        return logs.Count;
+        return written;
+    }
+
+    /// <summary>
+    /// Maps Pool Math pool id to its public share page. Pools without sharing enabled are absent,
+    /// so the status page can link only the ones that actually resolve.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<string, string>> ShareUrlsAsync(
+        IPoolMathClient poolMath, CancellationToken ct)
+    {
+        try
+        {
+            var pools = await poolMath.ListPoolsAsync(ct);
+
+            return pools
+                .Where(p => p.ShareCodeOrNull is not null)
+                .ToDictionary(
+                    p => p.Id,
+                    p => _poolMath.ShareUrlTemplate.Replace(
+                        "{code}", Uri.EscapeDataString(p.ShareCodeOrNull!), StringComparison.Ordinal),
+                    StringComparer.Ordinal);
+        }
+        catch (Exception ex) when (ex is PoolMathException or HttpRequestException)
+        {
+            // Share links are decoration. Losing them must not fail a sync that would otherwise work.
+            logger.LogWarning("Could not read Pool Math share settings: {Message}", ex.Message);
+            return new Dictionary<string, string>(StringComparer.Ordinal);
+        }
     }
 
     private static LatestReadings? LatestReadingsFor(

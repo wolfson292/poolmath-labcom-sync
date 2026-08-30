@@ -135,6 +135,10 @@ The readings shown are the newest LabCOM holds, which is not always what has bee
 body whose last test predates the backfill window still shows its readings, with the test date
 alongside so a stale one is obvious.
 
+Each pool's name links to its public Pool Math share page when one exists. The share code is read
+from Pool Math on every run rather than configured, so a pool is linked only while sharing is
+actually enabled for it and the link appears on its own once you turn sharing on in the app.
+
 > These endpoints are unauthenticated, including `POST /sync`. That's fine on a trusted LAN; don't
 > publish the port to the internet. `POST /sync` only ever triggers the same work the timer does,
 > and concurrent runs are rejected rather than queued, so it can't be used to double-write.

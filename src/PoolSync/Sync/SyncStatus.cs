@@ -43,13 +43,15 @@ public sealed class SyncStatus
         string name,
         int sessionsWritten,
         DateTimeOffset? lastSyncedReading,
-        LatestReadings? latest) =>
+        LatestReadings? latest,
+        string? shareUrl) =>
         _waterBodies[name] = new WaterBodyStatus(
             name,
             sessionsWritten,
             lastSyncedReading,
             DateTimeOffset.UtcNow,
-            latest);
+            latest,
+            shareUrl);
 }
 
 public sealed record WaterBodyStatus(
@@ -57,7 +59,9 @@ public sealed record WaterBodyStatus(
     int SessionsWrittenThisRun,
     DateTimeOffset? LastSyncedReadingAt,
     DateTimeOffset CheckedAt,
-    LatestReadings? Latest);
+    LatestReadings? Latest,
+    /// <summary>Public Pool Math share page, or null when sharing is off for this pool.</summary>
+    string? ShareUrl);
 
 /// <summary>
 /// The most recent test run LabCOM holds for a water body, mapped onto Pool Math's parameters.

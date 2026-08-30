@@ -58,6 +58,9 @@
   .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: .75rem; padding: 1rem 1.1rem; }
   .card h2 { font-size: 1.05rem; margin: 0 0 .15rem; }
+  .card h2 a { color: var(--accent); text-decoration: none; }
+  .card h2 a:hover { text-decoration: underline; }
+  .card h2 a::after { content: " \2197"; font-size: .8em; opacity: .7; }
   .when { color: var(--muted); font-size: .85rem; margin-bottom: .8rem; }
   dl { display: grid; grid-template-columns: auto 1fr; gap: .3rem .9rem; margin: 0; }
   dt { color: var(--muted); font-size: .85rem; }
@@ -111,7 +114,17 @@
     el.className = "card";
 
     const title = document.createElement("h2");
-    title.textContent = body.name;
+    if (body.shareUrl) {
+      // Only linked when Pool Math actually reports a share code, so there are no dead links.
+      const a = document.createElement("a");
+      a.href = body.shareUrl;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = body.name;
+      title.appendChild(a);
+    } else {
+      title.textContent = body.name;
+    }
     el.appendChild(title);
 
     const latest = body.latest;
@@ -194,6 +207,11 @@
     if (data.consecutiveFailures > 0) {
       parts.push(data.consecutiveFailures + " consecutive failure(s)");
     }
+    const unshared = (data.waterBodies || []).filter((b) => !b.shareUrl).length;
+    if (unshared > 0) {
+      parts.push(unshared + " pool(s) not shared — enable sharing in Pool Math to link them");
+    }
+
     document.getElementById("foot").innerHTML = parts.join(" · ");
   }
 
