@@ -94,9 +94,13 @@ public sealed class SyncWorker(
         var cloudAccount = await labCom.GetCloudAccountAsync(ct);
         var now = DateTimeOffset.UtcNow;
 
-        foreach (var waterBody in _waterBodies.Where(w => w.Enabled))
+        var enabled = _waterBodies.Where(w => w.Enabled).ToList();
+        var written = 0;
+
+        foreach (var waterBody in enabled)
         {
-            await SyncWaterBodyAsync(waterBody, cloudAccount, state, mapper, poolMath, now, ct);
+            written += await SyncWaterBodyAsync(
+                waterBody, cloudAccount, state, mapper, poolMath, now, ct);
         }
 
         // A dry run has to stay side-effect free. Persisting the high-water mark here would mean
@@ -106,10 +110,18 @@ public sealed class SyncWorker(
             await store.SaveAsync(state, ct);
         }
 
+        // A quiet run is the normal case, so say so explicitly: without this the logs are silent
+        // between syncs and a healthy service looks the same as a stalled one.
+        logger.LogInformation(
+            "Sync complete: checked {WaterBodies} water body/bodies, wrote {Logs} test log(s).",
+            enabled.Count,
+            written);
+
         status.RunSucceeded();
     }
 
-    private async Task SyncWaterBodyAsync(
+    /// <summary>Returns the number of test logs written for this water body.</summary>
+    private async Task<int> SyncWaterBodyAsync(
         WaterBodyOptions waterBody,
         CloudAccount cloudAccount,
         SyncState state,
@@ -128,7 +140,7 @@ public sealed class SyncWorker(
                 waterBody.LabComAccountId,
                 waterBody.Name,
                 string.Join(", ", cloudAccount.Accounts.Select(a => $"{a.Id} ({a.DisplayName})")));
-            return;
+            return 0;
         }
 
         var bodyState = state.For(waterBody.LabComAccountId);
@@ -147,7 +159,7 @@ public sealed class SyncWorker(
         {
             logger.LogDebug("{Name}: no new LabCOM measurements.", waterBody.Name);
             status.RecordWaterBody(waterBody.Name, 0, bodyState.LastSessionTimestamp);
-            return;
+            return 0;
         }
 
         // A session still in progress would otherwise be split across two Pool Math logs.
@@ -163,7 +175,7 @@ public sealed class SyncWorker(
                 waterBody.Name,
                 candidates.Count);
             status.RecordWaterBody(waterBody.Name, 0, bodyState.LastSessionTimestamp);
-            return;
+            return 0;
         }
 
         var logs = new List<PoolMathTestLog>();
@@ -207,5 +219,7 @@ public sealed class SyncWorker(
             bodyState.LastMeasurementId);
 
         status.RecordWaterBody(waterBody.Name, logs.Count, bodyState.LastSessionTimestamp);
+
+        return logs.Count;
     }
 }
