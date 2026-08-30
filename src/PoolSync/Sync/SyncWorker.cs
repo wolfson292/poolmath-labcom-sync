@@ -42,11 +42,43 @@ public sealed class SyncWorker(
                 // Keep the loop alive: LabCOM and Pool Math both have transient outages, and the
                 // high-water mark means a failed run simply retries the same readings next tick.
                 status.RunFailed(ex);
-                logger.LogError(ex, "Sync run failed; retrying in {Interval}.", _sync.Interval);
+
+                if (IsTransientNetworkFailure(ex))
+                {
+                    // A dropped connection or timeout is expected occasionally and recovers on its
+                    // own. Logging the full trace for one buries the failures that need attention.
+                    logger.LogWarning(
+                        "Sync run failed to reach a remote service ({Message}); retrying in {Interval}.",
+                        ex.Message,
+                        _sync.Interval);
+                }
+                else
+                {
+                    logger.LogError(ex, "Sync run failed; retrying in {Interval}.", _sync.Interval);
+                }
             }
         }
         while (await timer.WaitForNextTickAsync(stoppingToken));
     }
+
+    /// <summary>
+    /// Network faults that resolve themselves: connection drops, timeouts, and the timeout the
+    /// resilience pipeline raises once its own budget is spent.
+    /// </summary>
+    private static bool IsTransientNetworkFailure(Exception exception) =>
+        exception switch
+        {
+            HttpRequestException or TaskCanceledException or OperationCanceledException
+                or System.IO.IOException or System.Net.Sockets.SocketException => true,
+
+            // Raised by the standard resilience handler. Matched by name so this doesn't take a
+            // direct dependency on Polly, which arrives only transitively.
+            _ when exception.GetType().FullName == "Polly.Timeout.TimeoutRejectedException" => true,
+
+            { InnerException: { } inner } => IsTransientNetworkFailure(inner),
+
+            _ => false,
+        };
 
     private async Task RunOnceAsync(CancellationToken ct)
     {
