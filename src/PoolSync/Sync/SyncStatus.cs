@@ -1,8 +1,9 @@
 using System.Collections.Concurrent;
+using PoolSync.PoolMath;
 
 namespace PoolSync.Sync;
 
-/// <summary>Last-run information, surfaced on /status for monitoring from the NUC.</summary>
+/// <summary>Last-run information, surfaced on /status and rendered by the root page.</summary>
 public sealed class SyncStatus
 {
     private readonly ConcurrentDictionary<string, WaterBodyStatus> _waterBodies = new(StringComparer.Ordinal);
@@ -38,16 +39,55 @@ public sealed class SyncStatus
         ConsecutiveFailures++;
     }
 
-    public void RecordWaterBody(string name, int sessionsWritten, DateTimeOffset? lastReading) =>
+    public void RecordWaterBody(
+        string name,
+        int sessionsWritten,
+        DateTimeOffset? lastSyncedReading,
+        LatestReadings? latest) =>
         _waterBodies[name] = new WaterBodyStatus(
             name,
             sessionsWritten,
-            lastReading,
-            DateTimeOffset.UtcNow);
+            lastSyncedReading,
+            DateTimeOffset.UtcNow,
+            latest);
 }
 
 public sealed record WaterBodyStatus(
     string Name,
     int SessionsWrittenThisRun,
-    DateTimeOffset? LastReadingAt,
-    DateTimeOffset CheckedAt);
+    DateTimeOffset? LastSyncedReadingAt,
+    DateTimeOffset CheckedAt,
+    LatestReadings? Latest);
+
+/// <summary>
+/// The most recent test run LabCOM holds for a water body, mapped onto Pool Math's parameters.
+/// This is what LabCOM reports, not necessarily what has been synced.
+/// </summary>
+public sealed record LatestReadings(
+    DateTimeOffset TakenAt,
+    double? Fc,
+    double? Cc,
+    double? Ph,
+    double? Ta,
+    double? Cya,
+    double? Ch,
+    double? Salt,
+    double? Bor,
+    double? Tds,
+    double? WaterTemp,
+    int? WaterTempUnits)
+{
+    public static LatestReadings From(DateTimeOffset takenAt, PoolMathTestLog log) => new(
+        takenAt,
+        log.Fc,
+        log.Cc,
+        log.Ph,
+        log.Ta,
+        log.Cya,
+        log.Ch,
+        log.Salt,
+        log.Bor,
+        log.Tds,
+        log.WaterTemp,
+        log.WaterTempUnits);
+}

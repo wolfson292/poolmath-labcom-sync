@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using Microsoft.Extensions.Options;
 using PoolSync.Configuration;
 using PoolSync.LabCom;
 using PoolSync.PoolMath;
@@ -24,6 +25,7 @@ builder.Services.AddOptions<SyncOptions>()
     .ValidateOnStart();
 
 builder.Services.AddSingleton<SyncStatus>();
+builder.Services.AddSingleton<SyncRunner>();
 builder.Services.AddSingleton<ISyncStateStore, FileSyncStateStore>();
 builder.Services.AddScoped<ReadingMapper>();
 
@@ -65,6 +67,10 @@ if (args.Contains("list-accounts") || args.Contains("list-pools") || args.Contai
     return;
 }
 
+// wwwroot/index.html is the root page: status for each water body plus a manual sync button.
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
 app.MapGet("/health", (SyncStatus status) =>
     status.IsHealthy
         ? Results.Ok(new { status = "healthy", status.LastSuccessAt })
@@ -72,15 +78,31 @@ app.MapGet("/health", (SyncStatus status) =>
             new { status = "unhealthy", status.LastError, status.ConsecutiveFailures },
             statusCode: StatusCodes.Status503ServiceUnavailable));
 
-app.MapGet("/status", (SyncStatus status) => Results.Ok(new
+app.MapGet("/status", (SyncStatus status, IOptions<SyncOptions> sync) => Results.Ok(new
 {
     status.LastRunStartedAt,
     status.LastSuccessAt,
     status.LastError,
     status.LastErrorAt,
     status.ConsecutiveFailures,
-    waterBodies = status.WaterBodies.Values,
+    dryRun = sync.Value.DryRun,
+    interval = sync.Value.Interval.ToString(),
+    waterBodies = status.WaterBodies.Values.OrderBy(w => w.Name),
 }));
+
+// Manual trigger for the button on the root page. A run already in progress is reported as such
+// rather than queued, so the page can say so instead of appearing to hang.
+app.MapPost("/sync", async (SyncRunner runner, CancellationToken ct) =>
+{
+    var result = await runner.RunAsync(ct);
+
+    return result.Outcome switch
+    {
+        "busy" => Results.Json(result, statusCode: StatusCodes.Status409Conflict),
+        "failed" => Results.Json(result, statusCode: StatusCodes.Status502BadGateway),
+        _ => Results.Ok(result),
+    };
+});
 
 await app.RunAsync();
 return;

@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pool Sync</title>
+<style>
+  /* No external assets: this runs on a LAN box that may have no internet route. */
+  :root {
+    --bg: #f4f6f8;
+    --card: #ffffff;
+    --ink: #1b2733;
+    --muted: #64748b;
+    --line: #dfe5ec;
+    --accent: #255aab;
+    --ok: #157347;
+    --warn: #a15c07;
+    --bad: #b02a37;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11161c;
+      --card: #1a222b;
+      --ink: #e7edf4;
+      --muted: #93a4b8;
+      --line: #2b3742;
+      --accent: #6ea8fe;
+      --ok: #4ade80;
+      --warn: #fbbf24;
+      --bad: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 1.5rem 1rem 3rem;
+    background: var(--bg); color: var(--ink);
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 60rem; margin: 0 auto; }
+  header { display: flex; flex-wrap: wrap; gap: .75rem 1rem; align-items: baseline; margin-bottom: .5rem; }
+  h1 { font-size: 1.4rem; margin: 0; letter-spacing: -.01em; }
+  .badge {
+    font-size: .75rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+    padding: .15rem .5rem; border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
+  }
+  .badge.dry { color: var(--warn); border-color: currentColor; }
+  .badge.live { color: var(--ok); border-color: currentColor; }
+  .bar { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; margin: 1rem 0 1.25rem; }
+  button {
+    font: inherit; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: #fff; border: 0;
+    padding: .55rem 1.1rem; border-radius: .5rem;
+  }
+  button:disabled { opacity: .55; cursor: default; }
+  #msg { color: var(--muted); font-size: .9rem; }
+  #msg.bad { color: var(--bad); }
+  #msg.ok { color: var(--ok); }
+  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: .75rem; padding: 1rem 1.1rem; }
+  .card h2 { font-size: 1.05rem; margin: 0 0 .15rem; }
+  .when { color: var(--muted); font-size: .85rem; margin-bottom: .8rem; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: .3rem .9rem; margin: 0; }
+  dt { color: var(--muted); font-size: .85rem; }
+  dd { margin: 0; font-variant-numeric: tabular-nums; text-align: right; }
+  .none { color: var(--muted); font-style: italic; font-size: .9rem; }
+  footer { margin-top: 1.5rem; color: var(--muted); font-size: .85rem; }
+  footer code { font-size: .95em; }
+  .err { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Pool Sync</h1>
+    <span class="badge" id="mode">…</span>
+    <span class="badge" id="interval"></span>
+  </header>
+
+  <div class="bar">
+    <button id="sync">Sync now</button>
+    <span id="msg"></span>
+  </div>
+
+  <div class="grid" id="bodies"></div>
+
+  <footer id="foot"></footer>
+</main>
+
+<script>
+  const PARAMS = [
+    ["fc", "FC", "ppm"], ["cc", "CC", "ppm"], ["ph", "pH", ""],
+    ["ta", "TA", "ppm"], ["cya", "CYA", "ppm"], ["ch", "CH", "ppm"],
+    ["salt", "Salt", "ppm"], ["bor", "Borate", "ppm"], ["tds", "TDS", "ppm"],
+  ];
+
+  const round = (n) => Math.round(n * 100) / 100;
+
+  function ago(iso) {
+    if (!iso) return "never";
+    const secs = (Date.now() - new Date(iso).getTime()) / 1000;
+    if (secs < 90) return "just now";
+    const mins = Math.round(secs / 60);
+    if (mins < 60) return mins + " min ago";
+    const hours = Math.round(mins / 60);
+    if (hours < 48) return hours + " hr ago";
+    return Math.round(hours / 24) + " days ago";
+  }
+
+  function card(body) {
+    const el = document.createElement("div");
+    el.className = "card";
+
+    const title = document.createElement("h2");
+    title.textContent = body.name;
+    el.appendChild(title);
+
+    const latest = body.latest;
+    const when = document.createElement("div");
+    when.className = "when";
+    when.textContent = latest
+      ? "Tested " + ago(latest.takenAt) + " · " + new Date(latest.takenAt).toLocaleString()
+      : "No readings yet";
+    el.appendChild(when);
+
+    if (!latest) {
+      const p = document.createElement("p");
+      p.className = "none";
+      p.textContent = "Nothing reported by LabCOM for this water body.";
+      el.appendChild(p);
+      return el;
+    }
+
+    const dl = document.createElement("dl");
+    let shown = 0;
+
+    for (const [key, label, unit] of PARAMS) {
+      const value = latest[key];
+      if (value === null || value === undefined) continue;
+      shown++;
+      const dt = document.createElement("dt");
+      dt.textContent = label;
+      const dd = document.createElement("dd");
+      dd.textContent = unit ? round(value) + " " + unit : round(value);
+      dl.append(dt, dd);
+    }
+
+    if (latest.waterTemp !== null && latest.waterTemp !== undefined) {
+      shown++;
+      const dt = document.createElement("dt");
+      dt.textContent = "Temp";
+      const dd = document.createElement("dd");
+      // waterTempUnits: 0 = Fahrenheit, 1 = Celsius, matching Pool Math.
+      dd.textContent = round(latest.waterTemp) + (latest.waterTempUnits === 1 ? " °C" : " °F");
+      dl.append(dt, dd);
+    }
+
+    if (shown === 0) {
+      const p = document.createElement("p");
+      p.className = "none";
+      p.textContent = "Last test had no parameters Pool Math tracks.";
+      el.appendChild(p);
+    } else {
+      el.appendChild(dl);
+    }
+
+    return el;
+  }
+
+  async function refresh() {
+    let data;
+    try {
+      const res = await fetch("status", { cache: "no-store" });
+      if (!res.ok) throw new Error("status returned " + res.status);
+      data = await res.json();
+    } catch (err) {
+      document.getElementById("foot").innerHTML =
+        '<span class="err">Could not load status: ' + err.message + "</span>";
+      return;
+    }
+
+    const mode = document.getElementById("mode");
+    mode.textContent = data.dryRun ? "Dry run" : "Live";
+    mode.className = "badge " + (data.dryRun ? "dry" : "live");
+    document.getElementById("interval").textContent = "every " + data.interval;
+
+    const grid = document.getElementById("bodies");
+    grid.replaceChildren(...(data.waterBodies || []).map(card));
+
+    const parts = ["Last sync " + ago(data.lastSuccessAt)];
+    if (data.lastError) {
+      parts.push('<span class="err">Last error ' + ago(data.lastErrorAt) + ": " +
+        data.lastError.replace(/[<>&]/g, "") + "</span>");
+    }
+    if (data.consecutiveFailures > 0) {
+      parts.push(data.consecutiveFailures + " consecutive failure(s)");
+    }
+    document.getElementById("foot").innerHTML = parts.join(" · ");
+  }
+
+  const button = document.getElementById("sync");
+  const msg = document.getElementById("msg");
+
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    msg.className = "";
+    msg.textContent = "Syncing…";
+
+    try {
+      const res = await fetch("sync", { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+
+      if (res.status === 409) {
+        msg.textContent = "A sync is already running.";
+      } else if (!res.ok) {
+        msg.className = "bad";
+        msg.textContent = "Sync failed: " + (body.error || res.status);
+      } else {
+        msg.className = "ok";
+        msg.textContent = body.logsWritten
+          ? "Wrote " + body.logsWritten + " test log(s)."
+          : "Up to date — nothing new to write.";
+      }
+    } catch (err) {
+      msg.className = "bad";
+      msg.textContent = "Sync failed: " + err.message;
+    } finally {
+      button.disabled = false;
+      refresh();
+    }
+  });
+
+  refresh();
+  setInterval(refresh, 30000);
+</script>
+</body>
+</html>

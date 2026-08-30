@@ -126,8 +126,18 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
 | Path      | Purpose                                                                    |
 | --------- | -------------------------------------------------------------------------- |
+| `/`       | Status page: the latest readings for each water body and a **Sync now** button. |
 | `/health` | 200 while healthy, 503 after 3 consecutive failed runs. Used by the container healthcheck. |
-| `/status` | Last run, last error, and per-water-body detail as JSON.                    |
+| `/status` | Last run, last error, and per-water-body readings as JSON.                  |
+| `POST /sync` | Runs a sync immediately. 200 with the number of logs written, 409 if a run is already in progress, 502 if the run failed. |
+
+The readings shown are the newest LabCOM holds, which is not always what has been synced — a water
+body whose last test predates the backfill window still shows its readings, with the test date
+alongside so a stale one is obvious.
+
+> These endpoints are unauthenticated, including `POST /sync`. That's fine on a trusted LAN; don't
+> publish the port to the internet. `POST /sync` only ever triggers the same work the timer does,
+> and concurrent runs are rejected rather than queued, so it can't be used to double-write.
 
 ## Configuration
 
