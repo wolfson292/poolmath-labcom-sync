@@ -5,8 +5,11 @@ using PoolSync.Sync;
 
 namespace PoolSync.Chemistry;
 
-/// <summary>A single reading and where it came from, so the page can show how current it is.</summary>
-public sealed record SourcedReading(double Value, string Source, DateTimeOffset? At);
+/// <summary>
+/// A single reading and where it came from, so the page can show how current it is. Note explains a
+/// value that was corrected on the way in.
+/// </summary>
+public sealed record SourcedReading(double Value, string Source, DateTimeOffset? At, string? Note = null);
 
 public static class ReadingSource
 {
@@ -32,7 +35,7 @@ public static class WaterReadings
     {
         var readings = new Dictionary<string, SourcedReading>(StringComparer.Ordinal);
 
-        void Offer(string key, double? value, string source, DateTimeOffset? at)
+        void Offer(string key, double? value, string source, DateTimeOffset? at, string? note = null)
         {
             if (value is not { } v || double.IsNaN(v))
             {
@@ -47,13 +50,14 @@ public static class WaterReadings
                 return;
             }
 
-            readings[key] = new SourcedReading(v, source, at);
+            readings[key] = new SourcedReading(v, source, at, note);
         }
 
         if (manual is not null)
         {
             Offer(WaterTempC, ToCelsius(manual.WaterTemp, manual.WaterTempUnits), ReadingSource.Manual, manual.WaterTempAt);
             Offer(PoolMathFields.Borate, manual.Bor, ReadingSource.Manual, manual.BorAt);
+            Offer(PoolMathFields.CalciumHardness, manual.Ch, ReadingSource.Manual, manual.ChAt);
         }
 
         if (labCom is not null)
@@ -80,10 +84,29 @@ public static class WaterReadings
             Offer(PoolMathFields.CalciumHardness, overview.Ch, ReadingSource.PoolMath, overview.ChTs);
             Offer(PoolMathFields.Salt, overview.Salt, ReadingSource.PoolMath, overview.SaltTs);
             Offer(PoolMathFields.Borate, overview.Bor, ReadingSource.PoolMath, overview.BorTs);
-            Offer(WaterTempC, ToCelsius(overview.WaterTemp, overview.WaterTempUnits), ReadingSource.PoolMath, overview.WaterTempTs);
+            var (tempC, tempNote) = PoolMathTemperature(overview.WaterTemp, overview.WaterTempUnits);
+            Offer(WaterTempC, tempC, ReadingSource.PoolMath, overview.WaterTempTs, tempNote);
         }
 
         return readings;
+    }
+
+    /// <summary>Above this a °C reading can't be pool water; it's a Fahrenheit number saved with the wrong unit.</summary>
+    public const double ImplausibleCelsius = 45;
+
+    /// <summary>
+    /// Reads a temperature from Pool Math, catching the easy mistake of saving a Fahrenheit number
+    /// with the unit set to Celsius: 81.9 °C is not pool water, but 81.9 °F is.
+    /// </summary>
+    private static (double? Celsius, string? Note) PoolMathTemperature(double? value, int? units)
+    {
+        var celsius = ToCelsius(value, units);
+        if (units == 1 && celsius > ImplausibleCelsius && ToCelsius(value, 0) is { } asFahrenheit and > 0)
+        {
+            return (asFahrenheit, $"saved in Pool Math as {value:0.##} °C; read as °F");
+        }
+
+        return (celsius, null);
     }
 
     /// <summary>Pool Math's temperature units: 0 = Fahrenheit, 1 = Celsius.</summary>

@@ -58,4 +58,37 @@ public class WaterReadingsTests
 
         Assert.Equal(ReadingSource.Manual, readings[PoolMathFields.Borate].Source);
     }
+
+    [Fact]
+    public void A_fahrenheit_number_saved_as_celsius_in_pool_math_is_read_as_fahrenheit()
+    {
+        var overview = new PoolMathOverview { WaterTemp = 81.92, WaterTempUnits = 1, WaterTempTs = Recent };
+
+        var reading = WaterReadings.Combine(overview, labCom: null, manual: null)[WaterReadings.WaterTempC];
+
+        Assert.Equal(27.7, reading.Value, precision: 1);
+        Assert.Equal("saved in Pool Math as 81.92 °C; read as °F", reading.Note);
+    }
+
+    [Fact]
+    public void A_real_celsius_temperature_is_left_alone()
+    {
+        var overview = new PoolMathOverview { WaterTemp = 29.2, WaterTempUnits = 1, WaterTempTs = Recent };
+
+        var reading = WaterReadings.Combine(overview, labCom: null, manual: null)[WaterReadings.WaterTempC];
+
+        Assert.Equal(29.2, reading.Value);
+        Assert.Null(reading.Note);
+    }
+
+    [Fact]
+    public void Manual_calcium_hardness_replaces_an_old_pool_math_value()
+    {
+        var overview = new PoolMathOverview { Ch = 200, ChTs = Old };
+        var manual = new ManualReadings { Ch = 350, ChAt = Recent };
+
+        var readings = WaterReadings.Combine(overview, labCom: null, manual);
+
+        Assert.Equal(new SourcedReading(350, ReadingSource.Manual, Recent), readings[PoolMathFields.CalciumHardness]);
+    }
 }

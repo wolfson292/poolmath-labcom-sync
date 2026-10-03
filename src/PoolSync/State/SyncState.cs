@@ -46,7 +46,7 @@ public sealed class WaterBodyState
 }
 
 /// <summary>
-/// The last temperature and borate entered by hand. Each is also written to Pool Math as it's saved;
+/// The last temperature, borate and calcium hardness entered by hand. Each is also written to Pool Math as it's saved;
 /// keeping them here means the balance on the status page reflects them even in a dry run.
 /// </summary>
 public sealed class ManualReadings
@@ -62,4 +62,9 @@ public sealed class ManualReadings
     public double? Bor { get; set; }
 
     public DateTimeOffset? BorAt { get; set; }
+
+    /// <summary>Calcium hardness, ppm as CaCO3.</summary>
+    public double? Ch { get; set; }
+
+    public DateTimeOffset? ChAt { get; set; }
 }

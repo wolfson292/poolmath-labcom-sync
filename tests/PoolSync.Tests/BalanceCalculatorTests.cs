@@ -117,12 +117,33 @@ public class BalanceCalculatorTests
     }
 
     [Fact]
-    public void A_fahrenheit_value_saved_as_celsius_is_flagged_not_used()
+    public void An_impossible_temperature_is_not_used()
     {
         var balance = Calculator.Calculate(Water(tempC: 81.92), Pool());
 
         Assert.Null(balance.Csi);
-        Assert.Contains(balance.Notes, n => n.Contains("looks like a Fahrenheit value"));
+        Assert.Contains(balance.Notes, n => n.Contains("can't be right"));
+    }
+
+    [Fact]
+    public void A_corrected_temperature_is_used_and_explained()
+    {
+        var water = Water();
+        water[WaterReadings.WaterTempC] = new SourcedReading(27.7, ReadingSource.PoolMath, null, "saved in Pool Math as 81.92 °C; read as °F");
+
+        var balance = Calculator.Calculate(water, Pool());
+
+        Assert.NotNull(balance.Csi);
+        Assert.Contains(balance.Notes, n => n.Contains("81.92 °C; read as °F"));
+    }
+
+    [Fact]
+    public void Stabilizer_is_given_in_pounds_and_cups()
+    {
+        var balance = Calculator.Calculate(Water(cya: 22.1), Pool());
+
+        var cya = Assert.Single(balance.Recommendations, r => r.Key == PoolMathFields.CyanuricAcid);
+        Assert.Equal("11 lb (24.8 cups) of stabilizer (cyanuric acid)", cya.Amount);
     }
 
     [Fact]

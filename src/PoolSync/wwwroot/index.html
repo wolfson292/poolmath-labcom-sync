@@ -191,6 +191,7 @@
       const dd = el("dd", "", temp(t.value, body.tempUnits));
       const from = provenance(t, body.latest);
       if (from) dd.appendChild(el("small", "", from));
+      if (t.note) dd.appendChild(el("small", "", t.note));
       dl.append(el("dt", "", "Temp"), dd);
     }
 
@@ -257,12 +258,15 @@
     units.append(new Option("°F", "0"), new Option("°C", "1"));
     const borInput = el("input");
     Object.assign(borInput, { type: "number", step: "1", min: "0", inputMode: "decimal", name: "bor", placeholder: "—" });
+    const chInput = el("input");
+    Object.assign(chInput, { type: "number", step: "10", min: "0", inputMode: "decimal", name: "ch", placeholder: "—" });
 
     tempInput.value = draft.temp ?? "";
     borInput.value = draft.bor ?? "";
+    chInput.value = draft.ch ?? "";
     units.value = draft.units ?? String(body.tempUnits ?? 0);
 
-    for (const input of [tempInput, units, borInput]) {
+    for (const input of [tempInput, units, borInput, chInput]) {
       input.addEventListener("input", () => { draft[input.name] = input.value; });
     }
 
@@ -273,6 +277,7 @@
     form.append(
       el("label", "", "Water temp"), tempInput, units,
       el("label", "", "Borate"), borInput, el("span", "unit", "ppm"),
+      el("label", "", "CH"), chInput, el("span", "unit", "ppm"),
       save, fmsg);
 
     form.addEventListener("submit", async (event) => {
@@ -280,9 +285,10 @@
       const payload = { waterBody: body.name, waterTempUnits: Number(units.value) };
       if (tempInput.value !== "") payload.waterTemp = Number(tempInput.value);
       if (borInput.value !== "") payload.bor = Number(borInput.value);
-      if (payload.waterTemp === undefined && payload.bor === undefined) {
+      if (chInput.value !== "") payload.ch = Number(chInput.value);
+      if (payload.waterTemp === undefined && payload.bor === undefined && payload.ch === undefined) {
         fmsg.className = "fmsg bad";
-        fmsg.textContent = "Enter a temperature, a borate reading, or both.";
+        fmsg.textContent = "Enter at least one reading.";
         return;
       }
 

@@ -75,9 +75,6 @@ public sealed class BalanceCalculator(BalanceOptions options)
     public const double CsiMin = -0.3;
     public const double CsiMax = 0.3;
 
-    /// <summary>Above this a °C reading is almost certainly a Fahrenheit number saved with the wrong unit.</summary>
-    private const double ImplausibleTempC = 45;
-
     public WaterBalance Calculate(IReadOnlyDictionary<string, SourcedReading> water, PoolProfile pool)
     {
         double? Get(string key) => water.TryGetValue(key, out var r) ? r.Value : null;
@@ -95,11 +92,16 @@ public sealed class BalanceCalculator(BalanceOptions options)
         var fc = Get(PoolMathFields.FreeChlorine);
         var tempC = Get(WaterReadings.WaterTempC);
 
-        if (tempC > ImplausibleTempC)
+        if (water.TryGetValue(WaterReadings.WaterTempC, out var temperature) && temperature.Note is not null)
         {
             notes.Add(
-                $"Water temperature reads {tempC:0.#} °C, which looks like a Fahrenheit value saved as " +
-                "Celsius. Enter the current temperature below to correct it.");
+                $"The water temperature was {temperature.Note}. Correct the entry in Pool Math, or save the " +
+                "current temperature below to replace it.");
+        }
+
+        if (tempC > WaterReadings.ImplausibleCelsius)
+        {
+            notes.Add($"Water temperature reads {tempC:0.#} °C, which can't be right. Enter the current temperature below.");
             tempC = null;
         }
 
@@ -209,7 +211,7 @@ public sealed class BalanceCalculator(BalanceOptions options)
             var mg = (cyaTarget - stab) * Litres(pool);
             recommendations.Add(new Recommendation(
                 PoolMathFields.CyanuricAcid, "CYA", stab, cyaTarget, "raise",
-                pool.VolumeLitres is null ? null : $"{Mass(mg, pool.Imperial)} of stabilizer (cyanuric acid)",
+                pool.VolumeLitres is null ? null : $"{Stabilizer(mg, pool.Imperial)} of stabilizer (cyanuric acid)",
                 "It dissolves slowly: put it in a sock in the skimmer basket and don't backwash for a week. " +
                 "Raise FC to match the new CYA."));
             Plan(PoolMathFields.CyanuricAcid, cyaTarget);
@@ -356,6 +358,18 @@ public sealed class BalanceCalculator(BalanceOptions options)
         return flOz < 128
             ? $"{flOz:0} fl oz"
             : $"{flOz / 128:0.##} gal ({flOz:0} fl oz)";
+    }
+
+    /// <summary>Granular cyanuric acid: about 2¼ dry cups to the pound.</summary>
+    private const double StabilizerCupsPerPound = 2.25;
+
+    /// <summary>Stabilizer is measured out by the cup as often as weighed, so show both.</summary>
+    internal static string Stabilizer(double mg, bool imperial)
+    {
+        var pounds = mg / 1000 / 453.592;
+        var cups = pounds * StabilizerCupsPerPound;
+        var weight = imperial ? $"{pounds:0.#} lb" : Mass(mg, imperial: false);
+        return $"{weight} ({cups:0.#} cups)";
     }
 
     internal static string Mass(double mg, bool imperial)

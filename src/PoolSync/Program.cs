@@ -108,11 +108,11 @@ app.MapPost("/sync", async (SyncRunner runner, CancellationToken ct) =>
     };
 });
 
-// Hand-entered temperature and borate, for the parameters a PoolLab doesn't measure.
+// Hand-entered temperature, borate and calcium hardness, for the parameters a PoolLab doesn't measure.
 app.MapPost("/manual", async (ManualEntryRequest request, SyncRunner runner, CancellationToken ct) =>
 {
     var result = await runner.RecordManualAsync(
-        request.WaterBody, request.WaterTemp, request.WaterTempUnits, request.Bor, ct);
+        request.WaterBody, request.WaterTemp, request.WaterTempUnits, request.Bor, request.Ch, ct);
 
     return result.Outcome switch
     {
@@ -168,4 +168,5 @@ static async Task RunDiscoveryAsync(WebApplication app, string[] args)
 }
 
 /// <summary>Body of POST /manual. Temperature units follow Pool Math: 0 = °F, 1 = °C.</summary>
-internal sealed record ManualEntryRequest(string WaterBody, double? WaterTemp, int? WaterTempUnits, double? Bor);
+internal sealed record ManualEntryRequest(
+    string WaterBody, double? WaterTemp, int? WaterTempUnits, double? Bor, double? Ch);

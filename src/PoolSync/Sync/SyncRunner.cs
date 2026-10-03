@@ -349,12 +349,12 @@ public sealed class SyncRunner(
             PoolProfile.From(pool, waterBody));
 
     /// <summary>
-    /// Saves a hand-entered temperature and/or borate: written to Pool Math as a test log of its own,
+    /// Saves hand-entered temperature, borate and/or calcium hardness: written to Pool Math as a test log of its own,
     /// and kept in the state file so the balance reflects it straight away. Then runs a sync so the
     /// status page picks up the change.
     /// </summary>
     public async Task<ManualEntryResult> RecordManualAsync(
-        string waterBodyName, double? waterTemp, int? waterTempUnits, double? borate, CancellationToken ct)
+        string waterBodyName, double? waterTemp, int? waterTempUnits, double? borate, double? ch, CancellationToken ct)
     {
         var waterBody = _waterBodies.FirstOrDefault(
             w => w.Enabled && string.Equals(w.Name, waterBodyName, StringComparison.OrdinalIgnoreCase));
@@ -364,9 +364,9 @@ public sealed class SyncRunner(
             return ManualEntryResult.Invalid($"No water body named {waterBodyName}.");
         }
 
-        if (waterTemp is null && borate is null)
+        if (waterTemp is null && borate is null && ch is null)
         {
-            return ManualEntryResult.Invalid("Enter a temperature, a borate reading, or both.");
+            return ManualEntryResult.Invalid("Enter a temperature, borate or calcium hardness reading.");
         }
 
         var units = waterTempUnits is 1 ? 1 : 0;
@@ -378,6 +378,11 @@ public sealed class SyncRunner(
         if (borate is < 0 or > 100)
         {
             return ManualEntryResult.Invalid("Borate should be between 0 and 100 ppm.");
+        }
+
+        if (ch is < 0 or > 2000)
+        {
+            return ManualEntryResult.Invalid("Calcium hardness should be between 0 and 2000 ppm.");
         }
 
         // Shares the sync gate: both read and save the state file, and a sync mid-way through would
@@ -401,6 +406,7 @@ public sealed class SyncRunner(
                 WaterTemp = waterTemp,
                 WaterTempUnits = waterTemp is null ? null : units,
                 Bor = borate,
+                Ch = ch,
             };
 
             await poolMath.PushTestLogsAsync([log], ct);
@@ -421,6 +427,12 @@ public sealed class SyncRunner(
                 bodyState.Manual.BorAt = now;
             }
 
+            if (ch is not null)
+            {
+                bodyState.Manual.Ch = ch;
+                bodyState.Manual.ChAt = now;
+            }
+
             if (log.Id is not null)
             {
                 bodyState.RecordLog(log.Id);
@@ -429,10 +441,11 @@ public sealed class SyncRunner(
             await store.SaveAsync(state, CancellationToken.None);
 
             logger.LogInformation(
-                "{Name}: saved manual reading (temperature {Temp}, borate {Borate}).",
+                "{Name}: saved manual reading (temperature {Temp}, borate {Borate}, CH {Ch}).",
                 waterBody.Name,
                 waterTemp is null ? "unchanged" : $"{waterTemp} °{(units == 1 ? "C" : "F")}",
-                borate?.ToString() ?? "unchanged");
+                borate?.ToString() ?? "unchanged",
+                ch?.ToString() ?? "unchanged");
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
