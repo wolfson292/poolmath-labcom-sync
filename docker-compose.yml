@@ -24,15 +24,24 @@ services:
       # 0 = Fahrenheit, 1 = Celsius. A PoolLab reports Celsius.
       POOLSYNC_Mapping__WaterTempUnits: ${POOLSYNC_Mapping__WaterTempUnits:-1}
       POOLSYNC_Mapping__NoteTemplate: ${POOLSYNC_Mapping__NoteTemplate:-}
+      # Product strengths the dosing advice is worked out for.
+      POOLSYNC_Balance__ChlorinePercent: ${POOLSYNC_Balance__ChlorinePercent:-10}
+      POOLSYNC_Balance__AcidPercent: ${POOLSYNC_Balance__AcidPercent:-31.45}
       POOLSYNC_WaterBodies__0__Name: ${POOLSYNC_WaterBodies__0__Name:-Water Body 1}
       POOLSYNC_WaterBodies__0__LabComAccountId: ${POOLSYNC_WaterBodies__0__LabComAccountId:-}
       POOLSYNC_WaterBodies__0__PoolMathPoolId: ${POOLSYNC_WaterBodies__0__PoolMathPoolId:-}
+      # Plaster, Fiberglass or Vinyl: sets the calcium hardness range.
+      POOLSYNC_WaterBodies__0__Surface: ${POOLSYNC_WaterBodies__0__Surface:-Plaster}
       POOLSYNC_WaterBodies__1__Name: ${POOLSYNC_WaterBodies__1__Name:-Water Body 2}
       POOLSYNC_WaterBodies__1__LabComAccountId: ${POOLSYNC_WaterBodies__1__LabComAccountId:-}
       POOLSYNC_WaterBodies__1__PoolMathPoolId: ${POOLSYNC_WaterBodies__1__PoolMathPoolId:-}
+      # Plaster, Fiberglass or Vinyl: sets the calcium hardness range.
+      POOLSYNC_WaterBodies__1__Surface: ${POOLSYNC_WaterBodies__1__Surface:-Plaster}
       POOLSYNC_WaterBodies__2__Name: ${POOLSYNC_WaterBodies__2__Name:-Water Body 3}
       POOLSYNC_WaterBodies__2__LabComAccountId: ${POOLSYNC_WaterBodies__2__LabComAccountId:-}
       POOLSYNC_WaterBodies__2__PoolMathPoolId: ${POOLSYNC_WaterBodies__2__PoolMathPoolId:-}
+      # Plaster, Fiberglass or Vinyl: sets the calcium hardness range.
+      POOLSYNC_WaterBodies__2__Surface: ${POOLSYNC_WaterBodies__2__Surface:-Plaster}
     ports:
       # Host port is configurable; the container always listens on 8080.
       - "${POOLSYNC_HTTP_PORT:-8080}:8080"

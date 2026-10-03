@@ -132,6 +132,49 @@ public sealed class PoolMathPool
     [JsonPropertyName("userId")]
     public string? UserId { get; set; }
 
+    /// <summary>0 = US gallons, otherwise litres.</summary>
+    [JsonPropertyName("poolVolumeUnit")]
+    public int? PoolVolumeUnit { get; set; }
+
+    /// <summary>Set when a salt cell model is chosen in the pool's settings.</summary>
+    [JsonPropertyName("swgModelId")]
+    public string? SwgModelId { get; set; }
+
+    [JsonPropertyName("trackSalt")]
+    public bool TrackSalt { get; set; }
+
+    [JsonPropertyName("saltMin")]
+    public double? SaltMin { get; set; }
+
+    [JsonPropertyName("saltMax")]
+    public double? SaltMax { get; set; }
+
+    [JsonPropertyName("saltTarget")]
+    public double? SaltTarget { get; set; }
+
+    [JsonPropertyName("trackBor")]
+    public bool TrackBor { get; set; }
+
+    [JsonPropertyName("borMin")]
+    public double? BorMin { get; set; }
+
+    [JsonPropertyName("borMax")]
+    public double? BorMax { get; set; }
+
+    [JsonPropertyName("borTarget")]
+    public double? BorTarget { get; set; }
+
+    [JsonPropertyName("overrideFCTarget")]
+    public double? OverrideFcTarget { get; set; }
+
+    /// <summary>0 = Fahrenheit, 1 = Celsius.</summary>
+    [JsonPropertyName("waterTempUnitDefault")]
+    public int? WaterTempUnitDefault { get; set; }
+
+    /// <summary>Pool Math's running summary: the newest value of each parameter and when it was logged.</summary>
+    [JsonPropertyName("overview")]
+    public PoolMathOverview? Overview { get; set; }
+
     /// <summary>
     /// The code that addresses this pool's public share page, or null when sharing is off. Pool
     /// Math offers two mechanisms; the per-pool code wins because it points at this pool alone.
@@ -140,6 +183,87 @@ public sealed class PoolMathPool
         ShareWithCode && !string.IsNullOrWhiteSpace(ShareCode) ? ShareCode
         : ShareWithTfp && !string.IsNullOrWhiteSpace(UserId) ? UserId
         : null;
+}
+
+/// <summary>
+/// The newest value of each parameter across all of a pool's logs, as Pool Math maintains it. Each
+/// value has its own timestamp because a test log rarely carries every parameter.
+/// </summary>
+public sealed class PoolMathOverview
+{
+    [JsonPropertyName("fc")]
+    public double? Fc { get; set; }
+
+    [JsonPropertyName("fcTs")]
+    public DateTimeOffset? FcTs { get; set; }
+
+    [JsonPropertyName("cc")]
+    public double? Cc { get; set; }
+
+    [JsonPropertyName("ccTs")]
+    public DateTimeOffset? CcTs { get; set; }
+
+    [JsonPropertyName("ph")]
+    public double? Ph { get; set; }
+
+    [JsonPropertyName("phTs")]
+    public DateTimeOffset? PhTs { get; set; }
+
+    [JsonPropertyName("ta")]
+    public double? Ta { get; set; }
+
+    [JsonPropertyName("taTs")]
+    public DateTimeOffset? TaTs { get; set; }
+
+    [JsonPropertyName("cya")]
+    public double? Cya { get; set; }
+
+    [JsonPropertyName("cyaTs")]
+    public DateTimeOffset? CyaTs { get; set; }
+
+    [JsonPropertyName("ch")]
+    public double? Ch { get; set; }
+
+    [JsonPropertyName("chTs")]
+    public DateTimeOffset? ChTs { get; set; }
+
+    [JsonPropertyName("salt")]
+    public double? Salt { get; set; }
+
+    [JsonPropertyName("saltTs")]
+    public DateTimeOffset? SaltTs { get; set; }
+
+    [JsonPropertyName("bor")]
+    public double? Bor { get; set; }
+
+    [JsonPropertyName("borTs")]
+    public DateTimeOffset? BorTs { get; set; }
+
+    [JsonPropertyName("waterTemp")]
+    public double? WaterTemp { get; set; }
+
+    [JsonPropertyName("waterTempUnits")]
+    public int? WaterTempUnits { get; set; }
+
+    [JsonPropertyName("waterTempTs")]
+    public DateTimeOffset? WaterTempTs { get; set; }
+
+    /// <summary>Pool Math's own CSI, kept for comparison with the one calculated here.</summary>
+    [JsonPropertyName("csi")]
+    public double? Csi { get; set; }
+}
+
+/// <summary>The public share page's JSON: the shared pool documents, overview included.</summary>
+public sealed class SharedPools
+{
+    [JsonPropertyName("pools")]
+    public List<SharedPool>? Pools { get; set; }
+}
+
+public sealed class SharedPool
+{
+    [JsonPropertyName("pool")]
+    public PoolMathPool? Pool { get; set; }
 }
 
 /// <summary>Paged list envelope used by /pools/list and /timeline/list.</summary>

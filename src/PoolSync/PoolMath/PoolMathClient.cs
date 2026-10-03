@@ -21,29 +21,46 @@ public sealed class PoolMathClient : IPoolMathClient
     private readonly HttpClient _http;
     private readonly PoolMathOptions _options;
     private readonly ILogger<PoolMathClient> _logger;
-    private readonly SemaphoreSlim _authGate = new(1, 1);
-
-    private PoolMathCredentials? _credentials;
+    private readonly PoolMathCredentialCache _cache;
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public PoolMathClient(
         HttpClient http,
         IOptions<PoolMathOptions> options,
+        PoolMathCredentialCache cache,
         ILogger<PoolMathClient> logger)
     {
         _http = http;
         _options = options.Value;
+        _cache = cache;
         _logger = logger;
 
         _http.BaseAddress = new Uri(
             _options.ApiServer.EndsWith('/') ? _options.ApiServer : _options.ApiServer + "/");
         _http.DefaultRequestHeaders.TryAddWithoutValidation("x-clientversion", _options.ClientVersion);
 
-        if (!string.IsNullOrWhiteSpace(_options.UserId) && !string.IsNullOrWhiteSpace(_options.AuthToken))
+        if (_cache.Current is null
+            && !string.IsNullOrWhiteSpace(_options.UserId)
+            && !string.IsNullOrWhiteSpace(_options.AuthToken))
         {
-            _credentials = new PoolMathCredentials(_options.UserId!, _options.AuthToken!);
+            _cache.Current = new PoolMathCredentials(_options.UserId!, _options.AuthToken!);
         }
+    }
+
+    public async Task<PoolMathPool?> GetSharedPoolAsync(string shareCode, CancellationToken ct)
+    {
+        var url = _options.ShareUrlTemplate.Replace(
+            "{code}", Uri.EscapeDataString(shareCode), StringComparison.Ordinal) + ".json";
+
+        using var response = await _http.GetAsync(url, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new PoolMathException($"Pool Math share page returned {(int)response.StatusCode}.");
+        }
+
+        var shared = await response.Content.ReadFromJsonAsync<SharedPools>(JsonOptions, ct);
+        return shared?.Pools?.FirstOrDefault()?.Pool;
     }
 
     public async Task<IReadOnlyList<PoolMathPool>> ListPoolsAsync(CancellationToken ct)
@@ -101,7 +118,7 @@ public sealed class PoolMathClient : IPoolMathClient
             response.Dispose();
             _logger.LogInformation("Pool Math rejected the stored token; signing in again.");
 
-            _credentials = null;
+            _cache.Current = null;
             credentials = await EnsureAuthenticatedAsync(ct);
             response = await PostAsync(route, content, credentials, ct);
         }
@@ -134,17 +151,17 @@ public sealed class PoolMathClient : IPoolMathClient
 
     private async Task<PoolMathCredentials> EnsureAuthenticatedAsync(CancellationToken ct)
     {
-        if (_credentials is not null)
+        if (_cache.Current is { } cached)
         {
-            return _credentials;
+            return cached;
         }
 
-        await _authGate.WaitAsync(ct);
+        await _cache.Gate.WaitAsync(ct);
         try
         {
-            if (_credentials is not null)
+            if (_cache.Current is { } signedIn)
             {
-                return _credentials;
+                return signedIn;
             }
 
             if (!CanSignIn)
@@ -154,13 +171,14 @@ public sealed class PoolMathClient : IPoolMathClient
                     "or PoolMath:Username and PoolMath:Password.");
             }
 
-            _credentials = await SignInAsync(ct);
-            _logger.LogInformation("Signed in to Pool Math as {UserId}.", _credentials.UserId);
-            return _credentials;
+            var credentials = await SignInAsync(ct);
+            _cache.Current = credentials;
+            _logger.LogInformation("Signed in to Pool Math as {UserId}.", credentials.UserId);
+            return credentials;
         }
         finally
         {
-            _authGate.Release();
+            _cache.Gate.Release();
         }
     }
 
@@ -215,4 +233,15 @@ public sealed class PoolMathClient : IPoolMathClient
 
     private static string Truncate(string value) =>
         value.Length <= 500 ? value : value[..500] + "...";
+}
+
+/// <summary>
+/// Holds the Pool Math token for the life of the process. The client itself is created per sync run,
+/// so without this every run signed in again — adding another authorization to the account each time.
+/// </summary>
+public sealed class PoolMathCredentialCache
+{
+    public PoolMathCredentials? Current { get; set; }
+
+    public SemaphoreSlim Gate { get; } = new(1, 1);
 }

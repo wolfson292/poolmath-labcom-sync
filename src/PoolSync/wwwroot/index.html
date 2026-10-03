@@ -69,6 +69,32 @@
   footer { margin-top: 1.5rem; color: var(--muted); font-size: .85rem; }
   footer code { font-size: .95em; }
   .err { color: var(--bad); }
+  .csi { display: flex; align-items: baseline; gap: .5rem; margin: 0 0 .8rem; font-variant-numeric: tabular-nums; }
+  .csi b { font-size: 1.15rem; }
+  .csi .ok { color: var(--ok); }
+  .csi .off { color: var(--warn); }
+  .csi small { color: var(--muted); }
+  dd.low, dd.high { color: var(--warn); font-weight: 600; }
+  dd small { display: block; color: var(--muted); font-size: .72rem; font-weight: 400; }
+  h3 { font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 1rem 0 .4rem; }
+  ul.recs { margin: 0; padding: 0; list-style: none; display: grid; gap: .55rem; }
+  ul.recs li { font-size: .92rem; }
+  ul.recs .what { font-weight: 600; font-variant-numeric: tabular-nums; }
+  ul.recs .note { display: block; color: var(--muted); font-size: .8rem; }
+  .balanced { color: var(--ok); font-size: .92rem; margin: 0; }
+  ul.notes { margin: .6rem 0 0; padding-left: 1.1rem; color: var(--muted); font-size: .82rem; }
+  form.manual { display: grid; grid-template-columns: auto 1fr auto; gap: .4rem .5rem; align-items: center; }
+  form.manual label { color: var(--muted); font-size: .85rem; }
+  form.manual input, form.manual select {
+    font: inherit; font-size: .92rem; width: 100%; min-width: 0;
+    padding: .3rem .45rem; border: 1px solid var(--line); border-radius: .4rem;
+    background: var(--bg); color: var(--ink);
+  }
+  form.manual .unit { color: var(--muted); font-size: .85rem; }
+  form.manual button { grid-column: 1 / -1; padding: .4rem .9rem; font-size: .9rem; }
+  form.manual .fmsg { grid-column: 1 / -1; font-size: .82rem; color: var(--muted); min-height: 1.1em; }
+  form.manual .fmsg.bad { color: var(--bad); }
+  form.manual .fmsg.ok { color: var(--ok); }
 </style>
 </head>
 <body>
@@ -109,77 +135,218 @@
     return Math.round(hours / 24) + " days ago";
   }
 
-  function card(body) {
-    const el = document.createElement("div");
-    el.className = "card";
+  // Typed-in values survive the 30-second refresh, which rebuilds every card.
+  const drafts = {};
 
-    const title = document.createElement("h2");
+  const LABELS = Object.fromEntries(PARAMS.map(([key, label, unit]) => [key, [label, unit]]));
+
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  const signed = (n) => (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n).toFixed(2);
+
+  function temp(celsius, units) {
+    return units === 1
+      ? round(celsius) + " °C"
+      : Math.round((celsius * 9 / 5 + 32) * 10) / 10 + " °F";
+  }
+
+  // Where a value came from, shown when it isn't from the latest LabCOM test.
+  function provenance(reading, latest) {
+    if (!reading.at) return reading.source;
+    const fromLatest = reading.source === "LabCOM" && latest && reading.at === latest.takenAt;
+    if (fromLatest) return null;
+    const date = new Date(reading.at);
+    const sameYear = date.getFullYear() === new Date().getFullYear();
+    return reading.source + " · " + date.toLocaleDateString(undefined,
+      sameYear ? { month: "short", day: "numeric" } : { month: "short", year: "numeric" });
+  }
+
+  function readings(body) {
+    const balance = body.balance;
+    const water = balance ? balance.water : null;
+    const status = Object.fromEntries((balance ? balance.targets : []).map((t) => [t.key, t.status]));
+    const dl = el("dl");
+    let shown = 0;
+
+    for (const [key, label, unit] of PARAMS) {
+      const reading = water ? water[key] : (body.latest && body.latest[key] != null
+        ? { value: body.latest[key], source: "LabCOM", at: body.latest.takenAt } : null);
+      if (!reading) continue;
+      shown++;
+      const dd = el("dd", status[key] === "low" || status[key] === "high" ? status[key] : "",
+        unit ? round(reading.value) + " " + unit : String(round(reading.value)));
+      const from = provenance(reading, body.latest);
+      if (from) dd.appendChild(el("small", "", from));
+      dl.append(el("dt", "", label), dd);
+    }
+
+    const t = water && water.waterTempC;
+    if (t) {
+      shown++;
+      const dd = el("dd", "", temp(t.value, body.tempUnits));
+      const from = provenance(t, body.latest);
+      if (from) dd.appendChild(el("small", "", from));
+      dl.append(el("dt", "", "Temp"), dd);
+    }
+
+    return shown ? dl : el("p", "none", "No readings yet.");
+  }
+
+  function balanceSection(body) {
+    const frag = document.createDocumentFragment();
+    const balance = body.balance;
+    if (!balance) return frag;
+
+    frag.appendChild(el("h3", "", "To reach Pool Math's ideal levels"));
+
+    if (balance.recommendations.length === 0) {
+      const unknown = balance.targets.filter((t) => t.status === "unknown").map((t) => t.label);
+      frag.appendChild(unknown.length
+        ? el("p", "none", "Nothing to add for the readings available. No reading yet for " + unknown.join(", ") + ".")
+        : el("p", "balanced", "Nothing to add — everything is in range."));
+    } else {
+      const ul = el("ul", "recs");
+      for (const r of balance.recommendations) {
+        const li = el("li");
+        const [, unit] = LABELS[r.key] || [r.label, ""];
+        li.appendChild(el("span", "what",
+          r.label + " " + round(r.current) + " → " + round(r.target) + (unit ? " " + unit : "")));
+        li.appendChild(document.createTextNode(r.amount ? ": " + r.amount : ""));
+        if (r.note) li.appendChild(el("span", "note", r.note));
+        ul.appendChild(li);
+      }
+      frag.appendChild(ul);
+    }
+
+    if (balance.notes.length) {
+      const ul = el("ul", "notes");
+      for (const n of balance.notes) ul.appendChild(el("li", "", n));
+      frag.appendChild(ul);
+    }
+
+    return frag;
+  }
+
+  function csiLine(balance) {
+    const line = el("div", "csi");
+    if (!balance || balance.csi === null || balance.csi === undefined) return null;
+    const inRange = (v) => v >= balance.csiMin && v <= balance.csiMax;
+    line.appendChild(el("span", "", "CSI"));
+    line.appendChild(el("b", inRange(balance.csi) ? "ok" : "off", signed(balance.csi)));
+    if (balance.csiAfter !== null && balance.csiAfter !== balance.csi) {
+      line.appendChild(el("small", "", "→ " + signed(balance.csiAfter) + " after the changes below"));
+    } else {
+      line.appendChild(el("small", "", "ideal " + signed(balance.csiMin) + " to " + signed(balance.csiMax)));
+    }
+    return line;
+  }
+
+  function manualForm(body) {
+    const draft = drafts[body.name] || (drafts[body.name] = {});
+    const form = el("form", "manual");
+
+    const tempInput = el("input");
+    Object.assign(tempInput, { type: "number", step: "0.1", inputMode: "decimal", name: "temp", placeholder: "—" });
+    const units = el("select");
+    units.name = "units";
+    units.append(new Option("°F", "0"), new Option("°C", "1"));
+    const borInput = el("input");
+    Object.assign(borInput, { type: "number", step: "1", min: "0", inputMode: "decimal", name: "bor", placeholder: "—" });
+
+    tempInput.value = draft.temp ?? "";
+    borInput.value = draft.bor ?? "";
+    units.value = draft.units ?? String(body.tempUnits ?? 0);
+
+    for (const input of [tempInput, units, borInput]) {
+      input.addEventListener("input", () => { draft[input.name] = input.value; });
+    }
+
+    const save = el("button", "", "Save to Pool Math");
+    save.type = "submit";
+    const fmsg = el("div", "fmsg");
+
+    form.append(
+      el("label", "", "Water temp"), tempInput, units,
+      el("label", "", "Borate"), borInput, el("span", "unit", "ppm"),
+      save, fmsg);
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const payload = { waterBody: body.name, waterTempUnits: Number(units.value) };
+      if (tempInput.value !== "") payload.waterTemp = Number(tempInput.value);
+      if (borInput.value !== "") payload.bor = Number(borInput.value);
+      if (payload.waterTemp === undefined && payload.bor === undefined) {
+        fmsg.className = "fmsg bad";
+        fmsg.textContent = "Enter a temperature, a borate reading, or both.";
+        return;
+      }
+
+      save.disabled = true;
+      fmsg.className = "fmsg";
+      fmsg.textContent = "Saving…";
+      try {
+        const res = await fetch("manual", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const result = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(result.error || (res.status === 409 ? "a sync is running, try again" : res.status));
+        delete drafts[body.name];
+        await refresh(true);
+      } catch (err) {
+        fmsg.className = "fmsg bad";
+        fmsg.textContent = "Not saved: " + err.message;
+        save.disabled = false;
+      }
+    });
+
+    return form;
+  }
+
+  function card(body) {
+    const card = el("div", "card");
+
+    const title = el("h2");
     if (body.shareUrl) {
       // Only linked when Pool Math actually reports a share code, so there are no dead links.
-      const a = document.createElement("a");
+      const a = el("a", "", body.name);
       a.href = body.shareUrl;
       a.target = "_blank";
       a.rel = "noopener noreferrer";
-      a.textContent = body.name;
       title.appendChild(a);
     } else {
       title.textContent = body.name;
     }
-    el.appendChild(title);
+    card.appendChild(title);
 
     const latest = body.latest;
-    const when = document.createElement("div");
-    when.className = "when";
-    when.textContent = latest
+    card.appendChild(el("div", "when", latest
       ? "Tested " + ago(latest.takenAt) + " · " + new Date(latest.takenAt).toLocaleString()
-      : "No readings yet";
-    el.appendChild(when);
+      : "No LabCOM readings yet"));
 
-    if (!latest) {
-      const p = document.createElement("p");
-      p.className = "none";
-      p.textContent = "Nothing reported by LabCOM for this water body.";
-      el.appendChild(p);
-      return el;
-    }
+    const csi = csiLine(body.balance);
+    if (csi) card.appendChild(csi);
 
-    const dl = document.createElement("dl");
-    let shown = 0;
+    card.appendChild(readings(body));
+    card.appendChild(balanceSection(body));
 
-    for (const [key, label, unit] of PARAMS) {
-      const value = latest[key];
-      if (value === null || value === undefined) continue;
-      shown++;
-      const dt = document.createElement("dt");
-      dt.textContent = label;
-      const dd = document.createElement("dd");
-      dd.textContent = unit ? round(value) + " " + unit : round(value);
-      dl.append(dt, dd);
-    }
+    card.appendChild(el("h3", "", "Add a reading LabCOM doesn't take"));
+    card.appendChild(manualForm(body));
 
-    if (latest.waterTemp !== null && latest.waterTemp !== undefined) {
-      shown++;
-      const dt = document.createElement("dt");
-      dt.textContent = "Temp";
-      const dd = document.createElement("dd");
-      // waterTempUnits: 0 = Fahrenheit, 1 = Celsius, matching Pool Math.
-      dd.textContent = round(latest.waterTemp) + (latest.waterTempUnits === 1 ? " °C" : " °F");
-      dl.append(dt, dd);
-    }
-
-    if (shown === 0) {
-      const p = document.createElement("p");
-      p.className = "none";
-      p.textContent = "Last test had no parameters Pool Math tracks.";
-      el.appendChild(p);
-    } else {
-      el.appendChild(dl);
-    }
-
-    return el;
+    return card;
   }
 
-  async function refresh() {
+  async function refresh(force) {
+    // Don't rebuild the cards out from under someone typing into one of them.
+    const active = document.activeElement;
+    if (!force && active && active.closest && active.closest("form.manual")) return;
+
     let data;
     try {
       const res = await fetch("status", { cache: "no-store" });

@@ -27,6 +27,10 @@ public sealed class DryRunPoolMathClient(
         }
     }
 
+    // A read: dry runs see the same share pages a live run does.
+    public Task<PoolMathPool?> GetSharedPoolAsync(string shareCode, CancellationToken ct) =>
+        inner.GetSharedPoolAsync(shareCode, ct);
+
     public Task PushTestLogsAsync(IReadOnlyList<PoolMathTestLog> logs, CancellationToken ct)
     {
         foreach (var log in logs)

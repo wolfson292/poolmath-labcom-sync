@@ -16,6 +16,8 @@ builder.Services.Configure<PoolMathOptions>(
     builder.Configuration.GetSection(PoolMathOptions.SectionName));
 builder.Services.Configure<MappingOptions>(
     builder.Configuration.GetSection(MappingOptions.SectionName));
+builder.Services.Configure<BalanceOptions>(
+    builder.Configuration.GetSection(BalanceOptions.SectionName));
 builder.Services.Configure<List<WaterBodyOptions>>(
     builder.Configuration.GetSection("WaterBodies"));
 
@@ -25,6 +27,7 @@ builder.Services.AddOptions<SyncOptions>()
     .ValidateOnStart();
 
 builder.Services.AddSingleton<SyncStatus>();
+builder.Services.AddSingleton<PoolMathCredentialCache>();
 builder.Services.AddSingleton<SyncRunner>();
 builder.Services.AddSingleton<ISyncStateStore, FileSyncStateStore>();
 builder.Services.AddScoped<ReadingMapper>();
@@ -105,6 +108,21 @@ app.MapPost("/sync", async (SyncRunner runner, CancellationToken ct) =>
     };
 });
 
+// Hand-entered temperature and borate, for the parameters a PoolLab doesn't measure.
+app.MapPost("/manual", async (ManualEntryRequest request, SyncRunner runner, CancellationToken ct) =>
+{
+    var result = await runner.RecordManualAsync(
+        request.WaterBody, request.WaterTemp, request.WaterTempUnits, request.Bor, ct);
+
+    return result.Outcome switch
+    {
+        "invalid" => Results.Json(result, statusCode: StatusCodes.Status400BadRequest),
+        "busy" => Results.Json(result, statusCode: StatusCodes.Status409Conflict),
+        "failed" => Results.Json(result, statusCode: StatusCodes.Status502BadGateway),
+        _ => Results.Ok(result),
+    };
+});
+
 await app.RunAsync();
 return;
 
@@ -148,3 +166,6 @@ static async Task RunDiscoveryAsync(WebApplication app, string[] args)
         }
     }
 }
+
+/// <summary>Body of POST /manual. Temperature units follow Pool Math: 0 = °F, 1 = °C.</summary>
+internal sealed record ManualEntryRequest(string WaterBody, double? WaterTemp, int? WaterTempUnits, double? Bor);

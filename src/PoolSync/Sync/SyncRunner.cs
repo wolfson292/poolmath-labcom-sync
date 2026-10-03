@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using PoolSync.Chemistry;
 using PoolSync.Configuration;
 using PoolSync.LabCom;
 using PoolSync.PoolMath;
@@ -16,6 +17,18 @@ public sealed record SyncRunResult(string Outcome, int LogsWritten, string? Erro
     public static SyncRunResult Failed(string error) => new("failed", 0, error);
 }
 
+/// <summary>Outcome of saving hand-entered readings, shaped for the /manual endpoint's response.</summary>
+public sealed record ManualEntryResult(string Outcome, string? Error)
+{
+    public static ManualEntryResult Saved() => new("ok", null);
+
+    public static ManualEntryResult Busy() => new("busy", null);
+
+    public static ManualEntryResult Invalid(string error) => new("invalid", error);
+
+    public static ManualEntryResult Failed(string error) => new("failed", error);
+}
+
 /// <summary>
 /// Performs one sync pass. Both the interval timer and the manual trigger go through here, and a
 /// gate makes overlapping runs impossible: two concurrent passes would read the same high-water
@@ -25,6 +38,7 @@ public sealed class SyncRunner(
     IServiceScopeFactory scopeFactory,
     IOptions<SyncOptions> syncOptions,
     IOptions<PoolMathOptions> poolMathOptions,
+    IOptions<BalanceOptions> balanceOptions,
     IOptions<List<WaterBodyOptions>> waterBodies,
     SyncStatus status,
     ILogger<SyncRunner> logger)
@@ -32,7 +46,11 @@ public sealed class SyncRunner(
     private readonly SyncOptions _sync = syncOptions.Value;
     private readonly PoolMathOptions _poolMath = poolMathOptions.Value;
     private readonly List<WaterBodyOptions> _waterBodies = waterBodies.Value;
+    private readonly BalanceCalculator _balance = new(balanceOptions.Value);
     private readonly SemaphoreSlim _gate = new(1, 1);
+
+    /// <summary>How long a manual entry waits for a scheduled run to finish before giving up.</summary>
+    private static readonly TimeSpan ManualEntryWait = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// Runs a sync unless one is already in progress, in which case the caller is told it's busy
@@ -120,7 +138,7 @@ public sealed class SyncRunner(
         var now = DateTimeOffset.UtcNow;
 
         var enabled = _waterBodies.Where(w => w.Enabled).ToList();
-        var shareUrls = await ShareUrlsAsync(poolMath, ct);
+        var pools = await PoolsAsync(poolMath, enabled, ct);
         var written = 0;
 
         try
@@ -128,7 +146,7 @@ public sealed class SyncRunner(
             foreach (var waterBody in enabled)
             {
                 written += await SyncWaterBodyAsync(
-                    waterBody, cloudAccount, state, mapper, poolMath, shareUrls, now, skipSettleTime, ct);
+                    waterBody, cloudAccount, state, mapper, poolMath, pools, now, skipSettleTime, ct);
             }
         }
         finally
@@ -160,12 +178,14 @@ public sealed class SyncRunner(
         SyncState state,
         ReadingMapper mapper,
         IPoolMathClient poolMath,
-        IReadOnlyDictionary<string, string> shareUrls,
+        IReadOnlyDictionary<string, PoolMathPool> pools,
         DateTimeOffset now,
         bool skipSettleTime,
         CancellationToken ct)
     {
-        var shareUrl = shareUrls.GetValueOrDefault(waterBody.PoolMathPoolId);
+        var pool = pools.GetValueOrDefault(waterBody.PoolMathPoolId);
+        var shareUrl = ShareUrl(pool);
+        var bodyState = state.For(waterBody.LabComAccountId);
 
         var account = cloudAccount.Accounts.FirstOrDefault(
             a => a.Id.ToString() == waterBody.LabComAccountId);
@@ -177,15 +197,14 @@ public sealed class SyncRunner(
                 waterBody.LabComAccountId,
                 waterBody.Name,
                 string.Join(", ", cloudAccount.Accounts.Select(a => $"{a.Id} ({a.DisplayName})")));
-            status.RecordWaterBody(waterBody.Name, 0, null, null, shareUrl);
+            status.RecordWaterBody(
+                waterBody.Name, 0, null, null, shareUrl, Balance(waterBody, pool, null, bodyState.Manual), TempUnits(pool));
             return 0;
         }
 
         // The newest readings LabCOM holds, whether or not they are new to us. The status page
         // shows these, so it stays populated even when there is nothing left to sync.
         var latest = LatestReadingsFor(account, waterBody, mapper);
-
-        var bodyState = state.For(waterBody.LabComAccountId);
 
         // The first run has no high-water mark, so the backfill window bounds the import instead.
         DateTimeOffset? cutoff = bodyState.LastMeasurementId == 0
@@ -200,7 +219,8 @@ public sealed class SyncRunner(
         if (candidates.Count == 0)
         {
             logger.LogDebug("{Name}: no new LabCOM measurements.", waterBody.Name);
-            status.RecordWaterBody(waterBody.Name, 0, bodyState.LastSessionTimestamp, latest, shareUrl);
+            status.RecordWaterBody(waterBody.Name, 0, bodyState.LastSessionTimestamp, latest, shareUrl,
+            Balance(waterBody, pool, latest, bodyState.Manual), TempUnits(pool));
             return 0;
         }
 
@@ -216,7 +236,8 @@ public sealed class SyncRunner(
                 "{Name}: {Count} new measurement(s) still settling; leaving them for the next run.",
                 waterBody.Name,
                 candidates.Count);
-            status.RecordWaterBody(waterBody.Name, 0, bodyState.LastSessionTimestamp, latest, shareUrl);
+            status.RecordWaterBody(waterBody.Name, 0, bodyState.LastSessionTimestamp, latest, shareUrl,
+            Balance(waterBody, pool, latest, bodyState.Manual), TempUnits(pool));
             return 0;
         }
 
@@ -263,36 +284,173 @@ public sealed class SyncRunner(
             sessions.Count,
             bodyState.LastMeasurementId);
 
-        status.RecordWaterBody(waterBody.Name, written, bodyState.LastSessionTimestamp, latest, shareUrl);
+        status.RecordWaterBody(waterBody.Name, written, bodyState.LastSessionTimestamp, latest, shareUrl,
+            Balance(waterBody, pool, latest, bodyState.Manual), TempUnits(pool));
 
         return written;
     }
 
     /// <summary>
-    /// Maps Pool Math pool id to its public share page. Pools without sharing enabled are absent,
-    /// so the status page can link only the ones that actually resolve.
+    /// The account's pools by id, for share links, settings and the current water summary. A pool
+    /// whose list entry carries no overview is filled in from its public share page.
     /// </summary>
-    private async Task<IReadOnlyDictionary<string, string>> ShareUrlsAsync(
-        IPoolMathClient poolMath, CancellationToken ct)
+    private async Task<IReadOnlyDictionary<string, PoolMathPool>> PoolsAsync(
+        IPoolMathClient poolMath, IReadOnlyList<WaterBodyOptions> enabled, CancellationToken ct)
     {
+        IReadOnlyList<PoolMathPool> pools;
         try
         {
-            var pools = await poolMath.ListPoolsAsync(ct);
-
-            return pools
-                .Where(p => p.ShareCodeOrNull is not null)
-                .ToDictionary(
-                    p => p.Id,
-                    p => _poolMath.ShareUrlTemplate.Replace(
-                        "{code}", Uri.EscapeDataString(p.ShareCodeOrNull!), StringComparison.Ordinal),
-                    StringComparer.Ordinal);
+            pools = await poolMath.ListPoolsAsync(ct);
         }
         catch (Exception ex) when (ex is PoolMathException or HttpRequestException)
         {
-            // Share links are decoration. Losing them must not fail a sync that would otherwise work.
-            logger.LogWarning("Could not read Pool Math share settings: {Message}", ex.Message);
-            return new Dictionary<string, string>(StringComparer.Ordinal);
+            // Pool details only feed the status page. Losing them must not fail a sync that would
+            // otherwise work.
+            logger.LogWarning("Could not read Pool Math pools: {Message}", ex.Message);
+            return new Dictionary<string, PoolMathPool>(StringComparer.Ordinal);
         }
+
+        var wanted = enabled.Select(w => w.PoolMathPoolId).ToHashSet(StringComparer.Ordinal);
+        var byId = new Dictionary<string, PoolMathPool>(StringComparer.Ordinal);
+
+        foreach (var pool in pools.Where(p => wanted.Contains(p.Id)))
+        {
+            byId[pool.Id] = pool;
+
+            if (pool.Overview is not null || pool.ShareCodeOrNull is not { } code)
+            {
+                continue;
+            }
+
+            try
+            {
+                pool.Overview = (await poolMath.GetSharedPoolAsync(code, ct))?.Overview;
+            }
+            catch (Exception ex) when (ex is PoolMathException or HttpRequestException or System.Text.Json.JsonException)
+            {
+                logger.LogWarning("Could not read the Pool Math share page for {Pool}: {Message}", pool.Name, ex.Message);
+            }
+        }
+
+        return byId;
+    }
+
+    private string? ShareUrl(PoolMathPool? pool) =>
+        pool?.ShareCodeOrNull is { } code
+            ? _poolMath.ShareUrlTemplate.Replace("{code}", Uri.EscapeDataString(code), StringComparison.Ordinal)
+            : null;
+
+    private static int TempUnits(PoolMathPool? pool) => pool?.WaterTempUnitDefault ?? 0;
+
+    private WaterBalance Balance(
+        WaterBodyOptions waterBody, PoolMathPool? pool, LatestReadings? latest, ManualReadings manual) =>
+        _balance.Calculate(
+            WaterReadings.Combine(pool?.Overview, latest, manual),
+            PoolProfile.From(pool, waterBody));
+
+    /// <summary>
+    /// Saves a hand-entered temperature and/or borate: written to Pool Math as a test log of its own,
+    /// and kept in the state file so the balance reflects it straight away. Then runs a sync so the
+    /// status page picks up the change.
+    /// </summary>
+    public async Task<ManualEntryResult> RecordManualAsync(
+        string waterBodyName, double? waterTemp, int? waterTempUnits, double? borate, CancellationToken ct)
+    {
+        var waterBody = _waterBodies.FirstOrDefault(
+            w => w.Enabled && string.Equals(w.Name, waterBodyName, StringComparison.OrdinalIgnoreCase));
+
+        if (waterBody is null)
+        {
+            return ManualEntryResult.Invalid($"No water body named {waterBodyName}.");
+        }
+
+        if (waterTemp is null && borate is null)
+        {
+            return ManualEntryResult.Invalid("Enter a temperature, a borate reading, or both.");
+        }
+
+        var units = waterTempUnits is 1 ? 1 : 0;
+        if (waterTemp is { } t && WaterReadings.ToCelsius(t, units) is < -2 or > 45)
+        {
+            return ManualEntryResult.Invalid($"{t} °{(units == 1 ? "C" : "F")} isn't a plausible water temperature.");
+        }
+
+        if (borate is < 0 or > 100)
+        {
+            return ManualEntryResult.Invalid("Borate should be between 0 and 100 ppm.");
+        }
+
+        // Shares the sync gate: both read and save the state file, and a sync mid-way through would
+        // overwrite this entry with the copy it loaded before it.
+        if (!await _gate.WaitAsync(ManualEntryWait, ct))
+        {
+            return ManualEntryResult.Busy();
+        }
+
+        try
+        {
+            using var scope = scopeFactory.CreateScope();
+            var poolMath = scope.ServiceProvider.GetRequiredService<IPoolMathClient>();
+            var store = scope.ServiceProvider.GetRequiredService<ISyncStateStore>();
+
+            var now = DateTimeOffset.UtcNow;
+            var log = new PoolMathTestLog
+            {
+                PoolId = waterBody.PoolMathPoolId,
+                LogTimestamp = now.ToString("yyyy-MM-ddTHH:mm:ss.fff'Z'"),
+                WaterTemp = waterTemp,
+                WaterTempUnits = waterTemp is null ? null : units,
+                Bor = borate,
+            };
+
+            await poolMath.PushTestLogsAsync([log], ct);
+
+            var state = await store.LoadAsync(ct);
+            var bodyState = state.For(waterBody.LabComAccountId);
+
+            if (waterTemp is not null)
+            {
+                bodyState.Manual.WaterTemp = waterTemp;
+                bodyState.Manual.WaterTempUnits = units;
+                bodyState.Manual.WaterTempAt = now;
+            }
+
+            if (borate is not null)
+            {
+                bodyState.Manual.Bor = borate;
+                bodyState.Manual.BorAt = now;
+            }
+
+            if (log.Id is not null)
+            {
+                bodyState.RecordLog(log.Id);
+            }
+
+            await store.SaveAsync(state, CancellationToken.None);
+
+            logger.LogInformation(
+                "{Name}: saved manual reading (temperature {Temp}, borate {Borate}).",
+                waterBody.Name,
+                waterTemp is null ? "unchanged" : $"{waterTemp} °{(units == 1 ? "C" : "F")}",
+                borate?.ToString() ?? "unchanged");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "{Name}: could not save manual reading.", waterBody.Name);
+            return ManualEntryResult.Failed(ex.Message);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+
+        // Refresh the status page. A failure here is reported by the sync itself; the entry is saved.
+        await RunAsync(ct);
+        return ManualEntryResult.Saved();
     }
 
     private static LatestReadings? LatestReadingsFor(
