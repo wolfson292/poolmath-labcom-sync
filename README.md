@@ -19,7 +19,8 @@ A PoolLab records one measurement per parameter, a few minutes apart. Readings f
 body that chain together within `SessionWindow` (20 min) become a single test log, so a run that
 measures pH, FC and TA produces one Pool Math entry rather than three. A session is only written
 once its newest reading is `SessionSettleTime` (10 min) old, so a test still in progress isn't
-split across two entries.
+split across two entries. **Sync now** skips that wait: press it once the last parameter is
+measured and the test is written straight away.
 
 Duplicates are prevented by a per-water-body high-water mark on the LabCOM measurement id, stored
 in `/data/state.json`. A failed run writes nothing and retries the same readings on the next tick.
@@ -129,7 +130,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 | `/`       | Status page: the latest readings for each water body and a **Sync now** button. |
 | `/health` | 200 while healthy, 503 after 3 consecutive failed runs. Used by the container healthcheck. |
 | `/status` | Last run, last error, and per-water-body readings as JSON.                  |
-| `POST /sync` | Runs a sync immediately. 200 with the number of logs written, 409 if a run is already in progress, 502 if the run failed. |
+| `POST /sync` | Runs a sync immediately, writing sessions without waiting out `SessionSettleTime`. 200 with the number of logs written, 409 if a run is already in progress, 502 if the run failed. |
 
 The readings shown are the newest LabCOM holds, which is not always what has been synced — a water
 body whose last test predates the backfill window still shows its readings, with the test date
@@ -140,8 +141,35 @@ from Pool Math on every run rather than configured, so a pool is linked only whi
 actually enabled for it and the link appears on its own once you turn sharing on in the app.
 
 > These endpoints are unauthenticated, including `POST /sync`. That's fine on a trusted LAN; don't
-> publish the port to the internet. `POST /sync` only ever triggers the same work the timer does,
+> publish the port to the internet directly — put it behind a reverse proxy that authenticates
+> (see [Reverse proxy](#reverse-proxy)). `POST /sync` only ever triggers the same work the timer does,
 > and concurrent runs are rejected rather than queued, so it can't be used to double-write.
+
+## Reverse proxy
+
+[docker-compose.yml](docker-compose.yml) also joins the container to the reverse proxy's Docker
+network (`home` by default; set `POOLSYNC_PROXY_NETWORK` to change it), so the proxy can reach it as
+`poolmath-labcom-sync:8080`. The status page uses relative URLs, so it works under a subfolder as
+long as the proxy strips the prefix. For SWAG, at `nginx/proxy-confs/poolsync.subfolder.conf`:
+
+```nginx
+location /poolsync {
+    return 301 $scheme://$host/poolsync/;
+}
+
+location ^~ /poolsync/ {
+    include /config/nginx/proxy.conf;
+    include /config/nginx/authelia-location.conf;
+    include /config/nginx/resolver.conf;
+    set $upstream_app poolmath-labcom-sync;
+    set $upstream_port 8080;
+    set $upstream_proto http;
+    rewrite ^/poolsync/(.*)$ /$1 break;
+    proxy_pass $upstream_proto://$upstream_app:$upstream_port;
+}
+```
+
+Keep the authentication include: without it anyone who finds the URL can trigger syncs.
 
 ## Configuration
 
@@ -166,6 +194,13 @@ to override a setting it doesn't already list, add it there too.
 LabCOM parameters are matched on scenario id first, then on parameter name — see
 [MappingOptions.cs](src/PoolSync/Configuration/MappingOptions.cs). Covered by default: pH, free and
 total chlorine, alkalinity, CYA, calcium hardness, salt, borate, TDS and water temperature.
+
+Readings outside `Mapping:ValidRanges` are dropped with a warning instead of written. A PoolLab
+reports an over-range result as a number off the end of its scale — an FC of 1,000,000, a pH of
+9.0 — and Pool Math would take that as the pool's current value. The defaults are the PoolLab 1.0
+measuring ranges (pH 6.5–8.4, FC/TC 0–8, TA 0–200, CYA 0–160, CH 0–500); widen one with e.g.
+`POOLSYNC_Mapping__ValidRanges__fc__Max=10`. A value LabCOM formats as a bound (`>8.4`) is dropped
+too.
 
 Anything unmapped is skipped and logged at debug level. To add one, set
 `POOLSYNC_Mapping__ByParameter__<LabCOM parameter name>=<pool math field>`, where the field is one

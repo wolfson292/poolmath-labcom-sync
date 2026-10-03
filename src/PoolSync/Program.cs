@@ -91,10 +91,11 @@ app.MapGet("/status", (SyncStatus status, IOptions<SyncOptions> sync) => Results
 }));
 
 // Manual trigger for the button on the root page. A run already in progress is reported as such
-// rather than queued, so the page can say so instead of appearing to hang.
+// rather than queued, so the page can say so instead of appearing to hang. It skips the settle
+// time, so a test finished a moment ago is written now rather than on a later tick.
 app.MapPost("/sync", async (SyncRunner runner, CancellationToken ct) =>
 {
-    var result = await runner.RunAsync(ct);
+    var result = await runner.RunAsync(ct, skipSettleTime: true);
 
     return result.Outcome switch
     {

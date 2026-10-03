@@ -37,8 +37,12 @@ public sealed class SyncRunner(
     /// <summary>
     /// Runs a sync unless one is already in progress, in which case the caller is told it's busy
     /// rather than queued — a manual trigger during a scheduled run wants an answer, not a wait.
+    ///
+    /// <paramref name="skipSettleTime"/> writes sessions as soon as they exist instead of waiting
+    /// out <see cref="SyncOptions.SessionSettleTime"/>. The manual trigger sets it: whoever presses
+    /// the button has just finished a test and wants it in Pool Math now, not in half an hour.
     /// </summary>
-    public async Task<SyncRunResult> RunAsync(CancellationToken ct)
+    public async Task<SyncRunResult> RunAsync(CancellationToken ct, bool skipSettleTime = false)
     {
         if (!await _gate.WaitAsync(0, ct))
         {
@@ -47,7 +51,7 @@ public sealed class SyncRunner(
 
         try
         {
-            var written = await RunOnceAsync(ct);
+            var written = await RunOnceAsync(skipSettleTime, ct);
             return SyncRunResult.Succeeded(written);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -101,7 +105,7 @@ public sealed class SyncRunner(
             _ => false,
         };
 
-    private async Task<int> RunOnceAsync(CancellationToken ct)
+    private async Task<int> RunOnceAsync(bool skipSettleTime, CancellationToken ct)
     {
         status.RunStarted();
 
@@ -124,7 +128,7 @@ public sealed class SyncRunner(
             foreach (var waterBody in enabled)
             {
                 written += await SyncWaterBodyAsync(
-                    waterBody, cloudAccount, state, mapper, poolMath, shareUrls, now, ct);
+                    waterBody, cloudAccount, state, mapper, poolMath, shareUrls, now, skipSettleTime, ct);
             }
         }
         finally
@@ -158,6 +162,7 @@ public sealed class SyncRunner(
         IPoolMathClient poolMath,
         IReadOnlyDictionary<string, string> shareUrls,
         DateTimeOffset now,
+        bool skipSettleTime,
         CancellationToken ct)
     {
         var shareUrl = shareUrls.GetValueOrDefault(waterBody.PoolMathPoolId);
@@ -201,7 +206,7 @@ public sealed class SyncRunner(
 
         // A session still in progress would otherwise be split across two Pool Math logs.
         var sessions = mapper.GroupIntoSessions(candidates)
-            .Where(s => now - s.Timestamp >= _sync.SessionSettleTime)
+            .Where(s => skipSettleTime || now - s.Timestamp >= _sync.SessionSettleTime)
             .OrderBy(s => s.Timestamp)
             .ToList();
 
