@@ -53,6 +53,29 @@ public sealed class MappingOptions
     };
 
     /// <summary>
+    /// Readings outside these bounds are dropped rather than written. A PoolLab reports an
+    /// over-range result as an out-of-scale number (an FC of 1,000,000, a pH of 9.0) instead of
+    /// flagging it, and Pool Math would otherwise take that as the pool's current value. The
+    /// defaults are the PoolLab 1.0 measuring ranges; widen one if another photometer reads further.
+    /// Keyed by Pool Math field, inclusive at both ends. A field with no entry is not checked.
+    /// </summary>
+    public Dictionary<string, ValueRange> ValidRanges { get; set; } = new(StringComparer.Ordinal)
+    {
+        [PoolMathFields.Ph] = new(6.5, 8.4),
+        [PoolMathFields.FreeChlorine] = new(0, 8),
+        [PoolMathFields.TotalChlorine] = new(0, 8),
+        [PoolMathFields.CombinedChlorine] = new(0, 8),
+        [PoolMathFields.TotalAlkalinity] = new(0, 200),
+        [PoolMathFields.CyanuricAcid] = new(0, 160),
+        [PoolMathFields.CalciumHardness] = new(0, 500),
+        [PoolMathFields.Salt] = new(0, 10000),
+        [PoolMathFields.Borate] = new(0, 100),
+        [PoolMathFields.Tds] = new(0, 10000),
+        // Wide enough for either unit, since WaterTempUnits decides which one this is.
+        [PoolMathFields.WaterTemp] = new(-5, 120),
+    };
+
+    /// <summary>
     /// Pool Math records combined chlorine, LabCOM records total. When both free and total chlorine
     /// are present in a session, derive CC = total - free.
     /// </summary>
@@ -67,6 +90,26 @@ public sealed class MappingOptions
     /// no notes field on a test log, so this adds one the Pool Math UI may not surface.
     /// </summary>
     public string NoteTemplate { get; set; } = "";
+}
+
+/// <summary>An inclusive bound on a reading. Settable as Mapping__ValidRanges__ph__Max and so on.</summary>
+public sealed class ValueRange
+{
+    public ValueRange()
+    {
+    }
+
+    public ValueRange(double min, double max)
+    {
+        Min = min;
+        Max = max;
+    }
+
+    public double Min { get; set; } = double.MinValue;
+
+    public double Max { get; set; } = double.MaxValue;
+
+    public bool Contains(double value) => value >= Min && value <= Max;
 }
 
 /// <summary>Pool Math test-log field names, as they appear in the log document JSON.</summary>

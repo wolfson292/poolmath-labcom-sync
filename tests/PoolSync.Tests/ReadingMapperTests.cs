@@ -208,4 +208,70 @@ public class ReadingMapperTests
         Assert.Equal(0, mapper.ToTestLog(withTemp, WaterBody())?.WaterTempUnits);
         Assert.Null(mapper.ToTestLog(withoutTemp, WaterBody())?.WaterTempUnits);
     }
+
+    [Fact]
+    public void ToTestLog_drops_an_over_range_reading_and_keeps_the_rest()
+    {
+        var mapper = CreateMapper();
+        var session = new TestSession(
+        [
+            Measurement(1, "PL Chlorine Free", "1000000", 0),
+            Measurement(2, "PL pH", "9", 2),
+            Measurement(3, "PL T-Alka", "80", 4),
+        ]);
+
+        var log = mapper.ToTestLog(session, WaterBody());
+
+        Assert.Null(log?.Fc);
+        Assert.Null(log?.Ph);
+        Assert.Equal(80, log?.Ta);
+    }
+
+    [Fact]
+    public void ToTestLog_returns_null_when_every_reading_is_out_of_range()
+    {
+        var mapper = CreateMapper();
+        var session = new TestSession([Measurement(1, "PL Chlorine Free", "1000000", 0)]);
+
+        Assert.Null(mapper.ToTestLog(session, WaterBody()));
+    }
+
+    [Fact]
+    public void ToTestLog_drops_a_reading_labcom_formats_as_a_bound()
+    {
+        var mapper = CreateMapper();
+        var measurement = Measurement(1, "PL pH", "8.4", 0);
+        measurement.FormattedValue = ">8.4";
+
+        Assert.Null(mapper.ToTestLog(new TestSession([measurement]), WaterBody()));
+    }
+
+    [Fact]
+    public void ToTestLog_keeps_readings_at_the_edge_of_the_range()
+    {
+        var mapper = CreateMapper();
+        var session = new TestSession(
+        [
+            Measurement(1, "PL pH", "8.4", 0),
+            Measurement(2, "PL Chlorine Free", "0", 2),
+        ]);
+
+        var log = mapper.ToTestLog(session, WaterBody());
+
+        Assert.Equal(8.4, log?.Ph);
+        Assert.Equal(0, log?.Fc);
+    }
+
+    [Fact]
+    public void ToTestLog_honours_a_widened_range()
+    {
+        var mapping = new MappingOptions();
+        mapping.ValidRanges[PoolMathFields.FreeChlorine] = new ValueRange(0, 20);
+        var mapper = CreateMapper(mapping);
+
+        var log = mapper.ToTestLog(
+            new TestSession([Measurement(1, "PL Chlorine Free", "12", 0)]), WaterBody());
+
+        Assert.Equal(12, log?.Fc);
+    }
 }

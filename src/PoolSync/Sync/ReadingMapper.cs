@@ -90,6 +90,11 @@ public sealed class ReadingMapper(
                 continue;
             }
 
+            if (IsOutOfRange(measurement, field, value))
+            {
+                continue;
+            }
+
             values[field] = value;
         }
 
@@ -125,6 +130,30 @@ public sealed class ReadingMapper(
             WaterTempUnits = values.ContainsKey(PoolMathFields.WaterTemp) ? _mapping.WaterTempUnits : null,
             Notes = BuildNote(session),
         };
+    }
+
+    /// <summary>
+    /// True for a reading the photometer could not actually measure: either LabCOM formatted it as
+    /// a bound ("&gt;8.4") or the number falls outside the configured range for its field.
+    /// </summary>
+    private bool IsOutOfRange(LabComMeasurement measurement, string field, double value)
+    {
+        var formatted = measurement.FormattedValue?.TrimStart();
+        var flagged = formatted is { Length: > 0 } && formatted[0] is '<' or '>';
+
+        if (!flagged
+            && (!_mapping.ValidRanges.TryGetValue(field, out var range) || range.Contains(value)))
+        {
+            return false;
+        }
+
+        logger.LogWarning(
+            "LabCOM measurement {Id} for {Parameter} reads {Value}, outside what the photometer can " +
+            "measure; leaving it out of the Pool Math log.",
+            measurement.Id,
+            measurement.Parameter,
+            flagged ? measurement.FormattedValue : measurement.Value);
+        return true;
     }
 
     private string? ResolveField(LabComMeasurement measurement)
