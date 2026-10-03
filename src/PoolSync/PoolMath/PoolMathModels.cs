@@ -266,6 +266,120 @@ public sealed class SharedPool
     public PoolMathPool? Pool { get; set; }
 }
 
+/// <summary>
+/// One entry from /timeline/list: a test log, a chemical addition or a maintenance log, told apart by
+/// <see cref="Type"/>. One class with every field nullable, since the three share the envelope.
+/// </summary>
+public sealed class PoolMathTimelineEntry
+{
+    public const string TestLog = "testlog";
+    public const string ChemLog = "chemlog";
+    public const string MaintLog = "maintlog";
+
+    [JsonPropertyName("type")]
+    public string? Type { get; set; }
+
+    [JsonPropertyName("id")]
+    public string? Id { get; set; }
+
+    [JsonPropertyName("poolId")]
+    public string? PoolId { get; set; }
+
+    [JsonPropertyName("logTimestamp")]
+    public DateTimeOffset? LogTimestamp { get; set; }
+
+    [JsonPropertyName("deleted")]
+    public bool Deleted { get; set; }
+
+    [JsonPropertyName("notes")]
+    public string? Notes { get; set; }
+
+    [JsonPropertyName("weather")]
+    public System.Text.Json.JsonElement? Weather { get; set; }
+
+    // Test log.
+    [JsonPropertyName("fc")]
+    public double? Fc { get; set; }
+
+    [JsonPropertyName("cc")]
+    public double? Cc { get; set; }
+
+    [JsonPropertyName("ph")]
+    public double? Ph { get; set; }
+
+    [JsonPropertyName("ta")]
+    public double? Ta { get; set; }
+
+    [JsonPropertyName("cya")]
+    public double? Cya { get; set; }
+
+    [JsonPropertyName("ch")]
+    public double? Ch { get; set; }
+
+    [JsonPropertyName("salt")]
+    public double? Salt { get; set; }
+
+    [JsonPropertyName("bor")]
+    public double? Bor { get; set; }
+
+    [JsonPropertyName("tds")]
+    public double? Tds { get; set; }
+
+    [JsonPropertyName("waterTemp")]
+    public double? WaterTemp { get; set; }
+
+    [JsonPropertyName("waterTempUnits")]
+    public int? WaterTempUnits { get; set; }
+
+    // Chemical addition. Chemical and unit are Pool Math's own numeric codes.
+    [JsonPropertyName("chemical")]
+    public int? Chemical { get; set; }
+
+    [JsonPropertyName("amount")]
+    public double? Amount { get; set; }
+
+    [JsonPropertyName("unit")]
+    public int? Unit { get; set; }
+
+    [JsonPropertyName("percent")]
+    public double? Percent { get; set; }
+
+    /// <summary>The amount in mL or g, as Pool Math normalises it.</summary>
+    [JsonPropertyName("normalizedAmount")]
+    public double? NormalizedAmount { get; set; }
+
+    // Maintenance log.
+    [JsonPropertyName("backwashed")]
+    public bool? Backwashed { get; set; }
+
+    [JsonPropertyName("brushed")]
+    public bool? Brushed { get; set; }
+
+    [JsonPropertyName("vacuumed")]
+    public bool? Vacuumed { get; set; }
+
+    [JsonPropertyName("cleanedFilter")]
+    public bool? CleanedFilter { get; set; }
+
+    [JsonPropertyName("opened")]
+    public bool? Opened { get; set; }
+
+    [JsonPropertyName("closed")]
+    public bool? Closed { get; set; }
+
+    [JsonPropertyName("pressure")]
+    public double? Pressure { get; set; }
+
+    [JsonPropertyName("flowRate")]
+    public double? FlowRate { get; set; }
+
+    [JsonPropertyName("pumpRuntime")]
+    public double? PumpRuntime { get; set; }
+
+    [JsonPropertyName("swgCellPercent")]
+    public double? SwgCellPercent { get; set; }
+}
+
 /// <summary>Paged list envelope used by /pools/list and /timeline/list.</summary>
 public sealed class PagedResults<T>
 {

@@ -171,4 +171,12 @@ public class BalanceCalculatorTests
         Assert.Contains(balance.Notes, n => n.Contains("borate"));
         Assert.Equal("unknown", balance.Targets.Single(t => t.Key == PoolMathFields.Borate).Status);
     }
+
+    [Fact]
+    public void Small_doses_for_a_spa_keep_a_decimal()
+    {
+        Assert.Equal("0.3 fl oz", BalanceCalculator.Volume(9, imperial: true));
+        Assert.Equal("0.8 oz", BalanceCalculator.Mass(22_680, imperial: true));
+        Assert.Equal("0.03 oz", BalanceCalculator.Mass(850, imperial: true));
+    }
 }

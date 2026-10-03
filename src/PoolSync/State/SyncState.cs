@@ -46,6 +46,9 @@ public sealed class WaterBodyState
 }
 
 /// <summary>
+/// Superseded by the test history: hand-entered tests now go to the database, and any values left
+/// here are moved there on the next run. Kept only so older state files still load.
+///
 /// The last temperature, borate and calcium hardness entered by hand. Each is also written to Pool Math as it's saved;
 /// keeping them here means the balance on the status page reflects them even in a dry run.
 /// </summary>

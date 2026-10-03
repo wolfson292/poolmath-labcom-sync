@@ -83,7 +83,24 @@
   ul.recs .note { display: block; color: var(--muted); font-size: .8rem; }
   .balanced { color: var(--ok); font-size: .92rem; margin: 0; }
   ul.notes { margin: .6rem 0 0; padding-left: 1.1rem; color: var(--muted); font-size: .82rem; }
+  details.section { margin-top: .9rem; border-top: 1px solid var(--line); padding-top: .6rem; }
+  details.section > summary {
+    cursor: pointer; list-style: none; font-size: .8rem; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--muted); font-weight: 600;
+  }
+  details.section > summary::before { content: "▸ "; }
+  details.section[open] > summary::before { content: "▾ "; }
+  details.section > :not(summary) { margin-top: .6rem; }
+  ul.history { list-style: none; margin: 0; padding: 0; display: grid; gap: .45rem; font-size: .85rem; }
+  ul.history li { display: grid; grid-template-columns: 1fr auto; gap: .1rem .5rem; }
+  ul.history .meta { grid-column: 1; color: var(--muted); font-size: .78rem; }
+  ul.history .vals { grid-column: 1; font-variant-numeric: tabular-nums; }
+  ul.history button { grid-row: 1 / span 2; grid-column: 2; align-self: center; background: none; color: var(--bad);
+    border: 1px solid var(--line); padding: .15rem .5rem; font-size: .75rem; font-weight: 500; }
   form.manual { display: grid; grid-template-columns: auto 1fr auto; gap: .4rem .5rem; align-items: center; }
+  form.manual .wide { grid-column: 2 / -1; }
+  form.manual label.check { grid-column: 1 / -1; display: flex; gap: .5rem; align-items: center; color: var(--ink); }
+  form.manual label.check input { width: auto; }
   form.manual label { color: var(--muted); font-size: .85rem; }
   form.manual input, form.manual select {
     font: inherit; font-size: .92rem; width: 100%; min-width: 0;
@@ -247,68 +264,224 @@
     return line;
   }
 
-  function manualForm(body) {
+  // Remembers which collapsible sections are open, so the 30-second refresh doesn't close them.
+  const openSections = new Set();
+
+  function section(body, key, title, build) {
+    const details = el("details", "section");
+    const id = body.name + "|" + key;
+    details.open = openSections.has(id);
+    details.appendChild(el("summary", "", title));
+    let built = false;
+    const ensure = () => {
+      if (built || !details.open) return;
+      built = true;
+      details.appendChild(build());
+    };
+    details.addEventListener("toggle", () => {
+      details.open ? openSections.add(id) : openSections.delete(id);
+      ensure();
+    });
+    ensure();
+    return details;
+  }
+
+  function input(name, attrs) {
+    const node = el("input");
+    Object.assign(node, { name, inputMode: "decimal", placeholder: "—" }, attrs);
+    return node;
+  }
+
+  // Saving a form: posts, shows the outcome under the form, refreshes the page on success.
+  async function submit(form, message, button, url, method, payload) {
+    button.disabled = true;
+    message.className = "fmsg";
+    message.textContent = "Saving…";
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result.error || res.status);
+      return true;
+    } catch (err) {
+      message.className = "fmsg bad";
+      message.textContent = "Not saved: " + err.message;
+      button.disabled = false;
+      return false;
+    }
+  }
+
+  const TEST_FIELDS = [
+    ["fc", "FC", "ppm", "0.1"], ["cc", "CC", "ppm", "0.1"], ["ph", "pH", "", "0.01"],
+    ["ta", "TA", "ppm", "1"], ["cya", "CYA", "ppm", "1"], ["ch", "CH", "ppm", "10"],
+    ["salt", "Salt", "ppm", "50"], ["bor", "Borate", "ppm", "1"],
+  ];
+
+  function testForm(body) {
     const draft = drafts[body.name] || (drafts[body.name] = {});
     const form = el("form", "manual");
+    const inputs = {};
 
-    const tempInput = el("input");
-    Object.assign(tempInput, { type: "number", step: "0.1", inputMode: "decimal", name: "temp", placeholder: "—" });
+    for (const [key, label, unit, step] of TEST_FIELDS) {
+      inputs[key] = input(key, { type: "number", step, min: "0" });
+      form.append(el("label", "", label), inputs[key], el("span", "unit", unit));
+    }
+
+    inputs.waterTemp = input("waterTemp", { type: "number", step: "0.1" });
     const units = el("select");
     units.name = "units";
     units.append(new Option("°F", "0"), new Option("°C", "1"));
-    const borInput = el("input");
-    Object.assign(borInput, { type: "number", step: "1", min: "0", inputMode: "decimal", name: "bor", placeholder: "—" });
-    const chInput = el("input");
-    Object.assign(chInput, { type: "number", step: "10", min: "0", inputMode: "decimal", name: "ch", placeholder: "—" });
+    form.append(el("label", "", "Water temp"), inputs.waterTemp, units);
 
-    tempInput.value = draft.temp ?? "";
-    borInput.value = draft.bor ?? "";
-    chInput.value = draft.ch ?? "";
+    const when = input("when", { type: "datetime-local", inputMode: "text", placeholder: "" });
+    when.className = "wide";
+    form.append(el("label", "", "Taken"), when);
+    const notes = input("notes", { type: "text", inputMode: "text", placeholder: "optional" });
+    notes.className = "wide";
+    form.append(el("label", "", "Notes"), notes);
+
+    const all = [...Object.values(inputs), units, when, notes];
+    for (const node of all) {
+      node.value = draft[node.name] ?? "";
+      node.addEventListener("input", () => { draft[node.name] = node.value; });
+    }
     units.value = draft.units ?? String(body.tempUnits ?? 0);
 
-    for (const input of [tempInput, units, borInput, chInput]) {
-      input.addEventListener("input", () => { draft[input.name] = input.value; });
-    }
-
-    const save = el("button", "", "Save to Pool Math");
+    const save = el("button", "", "Save test");
     save.type = "submit";
-    const fmsg = el("div", "fmsg");
-
-    form.append(
-      el("label", "", "Water temp"), tempInput, units,
-      el("label", "", "Borate"), borInput, el("span", "unit", "ppm"),
-      el("label", "", "CH"), chInput, el("span", "unit", "ppm"),
-      save, fmsg);
+    const fmsg = el("div", "fmsg", "Leave “Taken” empty for now. Fill in only what you measured.");
+    form.append(save, fmsg);
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const payload = { waterBody: body.name, waterTempUnits: Number(units.value) };
-      if (tempInput.value !== "") payload.waterTemp = Number(tempInput.value);
-      if (borInput.value !== "") payload.bor = Number(borInput.value);
-      if (chInput.value !== "") payload.ch = Number(chInput.value);
-      if (payload.waterTemp === undefined && payload.bor === undefined && payload.ch === undefined) {
-        fmsg.className = "fmsg bad";
-        fmsg.textContent = "Enter at least one reading.";
-        return;
+      const payload = { waterBody: body.name, waterTempUnits: Number(units.value), notes: notes.value || null };
+      for (const [key, node] of Object.entries(inputs)) {
+        if (node.value !== "") payload[key] = Number(node.value);
       }
-
-      save.disabled = true;
-      fmsg.className = "fmsg";
-      fmsg.textContent = "Saving…";
-      try {
-        const res = await fetch("manual", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        const result = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(result.error || (res.status === 409 ? "a sync is running, try again" : res.status));
+      if (when.value) payload.takenAt = new Date(when.value).toISOString();
+      if (await submit(form, fmsg, save, "tests", "POST", payload)) {
         delete drafts[body.name];
         await refresh(true);
-      } catch (err) {
-        fmsg.className = "fmsg bad";
-        fmsg.textContent = "Not saved: " + err.message;
-        save.disabled = false;
+      }
+    });
+
+    return form;
+  }
+
+  function describeTest(t) {
+    const parts = [];
+    for (const [key, label, unit] of TEST_FIELDS) {
+      if (t[key] !== null && t[key] !== undefined) parts.push(label + " " + round(t[key]));
+    }
+    if (t.waterTemp !== null && t.waterTemp !== undefined) {
+      parts.push(round(t.waterTemp) + (t.waterTempUnits === 1 ? " °C" : " °F"));
+    }
+    return parts.join(" · ") || "—";
+  }
+
+  const SOURCE_NAMES = { labcom: "LabCOM", manual: "Manual", poolmath: "Pool Math" };
+
+  function historySection(body) {
+    const wrap = el("div");
+    const list = el("ul", "history");
+    wrap.appendChild(el("p", "none", "Loading…"));
+
+    fetch("tests?waterBody=" + encodeURIComponent(body.name) + "&limit=30", { cache: "no-store" })
+      .then((res) => res.json())
+      .then((tests) => {
+        wrap.replaceChildren(list);
+        if (!tests.length) wrap.replaceChildren(el("p", "none", "No tests stored yet."));
+        for (const t of tests) {
+          const li = el("li");
+          li.appendChild(el("span", "vals", describeTest(t)));
+          li.appendChild(el("span", "meta",
+            new Date(t.takenAt).toLocaleString() + " · " + (SOURCE_NAMES[t.source] || t.source) +
+            (t.notes ? " · " + t.notes : "")));
+          if (t.source === "manual") {
+            const del = el("button", "", "Delete");
+            del.type = "button";
+            del.addEventListener("click", async () => {
+              if (!confirm("Delete this test?")) return;
+              del.disabled = true;
+              const res = await fetch("tests/" + encodeURIComponent(t.id), { method: "DELETE" });
+              if (res.ok) { li.remove(); refresh(true); } else { del.disabled = false; }
+            });
+            li.appendChild(del);
+          }
+          list.appendChild(li);
+        }
+      })
+      .catch((err) => wrap.replaceChildren(el("p", "err", "Could not load history: " + err.message)));
+
+    return wrap;
+  }
+
+  function settingsSection(body) {
+    const s = body.settings || {};
+    const form = el("form", "manual");
+    const num = (name, step) => {
+      const node = input(name, { type: "number", step, min: "0" });
+      node.value = s[name] ?? "";
+      return node;
+    };
+    const select = (name, options, value) => {
+      const node = el("select");
+      node.name = name;
+      for (const [text, val] of options) node.append(new Option(text, val));
+      node.value = String(value);
+      return node;
+    };
+
+    const volume = num("volume", "100");
+    const volumeUnit = select("volumeUnit", [["gal", "0"], ["L", "1"]], s.volumeUnit ?? 0);
+    const surface = select("surface", [["Plaster", "Plaster"], ["Fiberglass", "Fiberglass"], ["Vinyl", "Vinyl"]],
+      s.surface ?? "Plaster");
+    surface.className = "wide";
+    const tempUnits = select("tempUnits", [["°F", "0"], ["°C", "1"]], s.tempUnits ?? 0);
+    tempUnits.className = "wide";
+    const swg = el("input");
+    swg.type = "checkbox";
+    swg.checked = !!s.swg;
+    const swgLabel = el("label", "check");
+    swgLabel.append(swg, document.createTextNode("Salt water generator"));
+
+    const fields = {
+      saltMin: num("saltMin", "100"), saltTarget: num("saltTarget", "100"), saltMax: num("saltMax", "100"),
+      borMin: num("borMin", "1"), borTarget: num("borTarget", "1"), borMax: num("borMax", "1"),
+      fcTarget: num("fcTarget", "0.5"),
+    };
+
+    form.append(
+      el("label", "", "Volume"), volume, volumeUnit,
+      el("label", "", "Surface"), surface,
+      el("label", "", "Temp unit"), tempUnits,
+      swgLabel,
+      el("label", "", "Salt min"), fields.saltMin, el("span", "unit", "ppm"),
+      el("label", "", "Salt target"), fields.saltTarget, el("span", "unit", "ppm"),
+      el("label", "", "Salt max"), fields.saltMax, el("span", "unit", "ppm"),
+      el("label", "", "Borate min"), fields.borMin, el("span", "unit", "ppm"),
+      el("label", "", "Borate target"), fields.borTarget, el("span", "unit", "ppm"),
+      el("label", "", "Borate max"), fields.borMax, el("span", "unit", "ppm"),
+      el("label", "", "FC target"), fields.fcTarget, el("span", "unit", "ppm"));
+
+    const save = el("button", "", "Save settings");
+    save.type = "submit";
+    const fmsg = el("div", "fmsg", "Leave a target empty to skip that check. FC target empty = follow CYA.");
+    form.append(save, fmsg);
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const value = (node) => (node.value === "" ? null : Number(node.value));
+      const payload = {
+        volume: value(volume), volumeUnit: Number(volumeUnit.value), surface: surface.value,
+        swg: swg.checked, tempUnits: Number(tempUnits.value),
+      };
+      for (const [key, node] of Object.entries(fields)) payload[key] = value(node);
+      if (await submit(form, fmsg, save, "settings/" + encodeURIComponent(body.name), "PUT", payload)) {
+        await refresh(true);
       }
     });
 
@@ -342,8 +515,9 @@
     card.appendChild(readings(body));
     card.appendChild(balanceSection(body));
 
-    card.appendChild(el("h3", "", "Add a reading LabCOM doesn't take"));
-    card.appendChild(manualForm(body));
+    card.appendChild(section(body, "add", "Add a test", () => testForm(body)));
+    card.appendChild(section(body, "history", "History", () => historySection(body)));
+    card.appendChild(section(body, "settings", "Pool settings", () => settingsSection(body)));
 
     return card;
   }
@@ -351,7 +525,7 @@
   async function refresh(force) {
     // Don't rebuild the cards out from under someone typing into one of them.
     const active = document.activeElement;
-    if (!force && active && active.closest && active.closest("form.manual")) return;
+    if (!force && active && active.closest && active.closest("#bodies form")) return;
 
     let data;
     try {
@@ -380,12 +554,38 @@
     if (data.consecutiveFailures > 0) {
       parts.push(data.consecutiveFailures + " consecutive failure(s)");
     }
-    const unshared = (data.waterBodies || []).filter((b) => !b.shareUrl).length;
-    if (unshared > 0) {
-      parts.push(unshared + " pool(s) not shared — enable sharing in Pool Math to link them");
+    const stored = data.stored || {};
+    const tests = Object.entries(stored).filter(([k]) => k.startsWith("tests:")).reduce((n, [, v]) => n + v, 0);
+    parts.push(tests + " tests stored");
+    if (data.poolMath) {
+      parts.push(!data.poolMath.enabled ? "Pool Math off"
+        : data.poolMath.writeLogs ? "copying tests to Pool Math" : "not writing to Pool Math");
     }
 
-    document.getElementById("foot").innerHTML = parts.join(" · ");
+    const foot = document.getElementById("foot");
+    foot.innerHTML = parts.join(" · ");
+
+    if (data.poolMath && data.poolMath.enabled) {
+      const importButton = el("button", "", stored["tests:poolmath"] ? "Re-import Pool Math history" : "Import Pool Math history");
+      importButton.style.cssText = "margin-left:.75rem;padding:.25rem .7rem;font-size:.8rem";
+      importButton.addEventListener("click", async () => {
+        importButton.disabled = true;
+        importButton.textContent = "Importing…";
+        try {
+          const res = await fetch("import/poolmath", { method: "POST" });
+          const r = await res.json();
+          if (!res.ok) throw new Error(r.error || res.status);
+          msg.className = "ok";
+          msg.textContent = "Imported " + r.tests + " test(s), " + r.additions + " addition(s), " +
+            r.maintenance + " maintenance entr(ies); " + r.alreadyImported + " already here.";
+        } catch (err) {
+          msg.className = "bad";
+          msg.textContent = "Import failed: " + err.message;
+        }
+        refresh(true);
+      });
+      foot.appendChild(importButton);
+    }
   }
 
   const button = document.getElementById("sync");

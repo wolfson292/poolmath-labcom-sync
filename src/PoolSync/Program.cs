@@ -1,9 +1,11 @@
 using System.Net.Http.Headers;
 using Microsoft.Extensions.Options;
 using PoolSync.Configuration;
+using PoolSync.Import;
 using PoolSync.LabCom;
 using PoolSync.PoolMath;
 using PoolSync.State;
+using PoolSync.Storage;
 using PoolSync.Sync;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -26,6 +28,12 @@ builder.Services.AddOptions<SyncOptions>()
     .ValidateDataAnnotations()
     .ValidateOnStart();
 
+// Surface and other enums go over the wire by name, which is what the settings form sends back.
+builder.Services.ConfigureHttpJsonOptions(
+    o => o.SerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
+
+builder.Services.AddSingleton<PoolDatabase>();
+builder.Services.AddScoped<PoolMathImporter>();
 builder.Services.AddSingleton<SyncStatus>();
 builder.Services.AddSingleton<PoolMathCredentialCache>();
 builder.Services.AddSingleton<SyncRunner>();
@@ -81,7 +89,9 @@ app.MapGet("/health", (SyncStatus status) =>
             new { status = "unhealthy", status.LastError, status.ConsecutiveFailures },
             statusCode: StatusCodes.Status503ServiceUnavailable));
 
-app.MapGet("/status", (SyncStatus status, IOptions<SyncOptions> sync) => Results.Ok(new
+app.MapGet("/status", async (
+    SyncStatus status, IOptions<SyncOptions> sync, IOptions<PoolMathOptions> poolMath, PoolDatabase database,
+    CancellationToken ct) => Results.Ok(new
 {
     status.LastRunStartedAt,
     status.LastSuccessAt,
@@ -90,6 +100,8 @@ app.MapGet("/status", (SyncStatus status, IOptions<SyncOptions> sync) => Results
     status.ConsecutiveFailures,
     dryRun = sync.Value.DryRun,
     interval = sync.Value.Interval.ToString(),
+    poolMath = new { poolMath.Value.Enabled, poolMath.Value.WriteLogs },
+    stored = await database.CountsAsync(ct),
     waterBodies = status.WaterBodies.Values.OrderBy(w => w.Name),
 }));
 
@@ -108,19 +120,70 @@ app.MapPost("/sync", async (SyncRunner runner, CancellationToken ct) =>
     };
 });
 
-// Hand-entered temperature, borate and calcium hardness, for the parameters a PoolLab doesn't measure.
-app.MapPost("/manual", async (ManualEntryRequest request, SyncRunner runner, CancellationToken ct) =>
+// Tests typed in on the page: any reading, at any time.
+app.MapPost("/tests", async (ManualTest request, SyncRunner runner, CancellationToken ct) =>
 {
-    var result = await runner.RecordManualAsync(
-        request.WaterBody, request.WaterTemp, request.WaterTempUnits, request.Bor, request.Ch, ct);
+    var result = await runner.RecordManualTestAsync(request, ct);
 
     return result.Outcome switch
     {
         "invalid" => Results.Json(result, statusCode: StatusCodes.Status400BadRequest),
-        "busy" => Results.Json(result, statusCode: StatusCodes.Status409Conflict),
-        "failed" => Results.Json(result, statusCode: StatusCodes.Status502BadGateway),
+        "failed" => Results.Json(result, statusCode: StatusCodes.Status500InternalServerError),
         _ => Results.Ok(result),
     };
+});
+
+// A water body's test history, newest first.
+app.MapGet("/tests", async (string waterBody, int? limit, PoolDatabase database, CancellationToken ct) =>
+    Results.Ok(await database.TestsAsync(waterBody, Math.Clamp(limit ?? 50, 1, 5000), ct)));
+
+// Only hand-entered tests can be deleted; synced and imported ones would come straight back.
+app.MapDelete("/tests/{id}", async (string id, PoolDatabase database, SyncRunner runner, CancellationToken ct) =>
+{
+    if (!await database.DeleteManualTestAsync(id, ct))
+    {
+        return Results.NotFound(new { error = "No hand-entered test with that id." });
+    }
+
+    await runner.RunAsync(ct);
+    return Results.NoContent();
+});
+
+// Copies Pool Math's whole history into the local database. Repeatable: already-imported entries
+// are skipped. Run it before cancelling the subscription.
+app.MapPost("/import/poolmath", async (
+    PoolMathImporter importer, IOptions<PoolMathOptions> poolMath, SyncRunner runner, CancellationToken ct) =>
+{
+    if (!poolMath.Value.Enabled)
+    {
+        return Results.Json(new { error = "Pool Math is turned off (PoolMath:Enabled=false)." }, statusCode: 409);
+    }
+
+    var result = await importer.ImportAsync(ct);
+    await runner.RunAsync(ct);
+    return Results.Ok(result);
+});
+
+// Pool settings, edited on the page. Replaces the whole set for that water body.
+app.MapPut("/settings/{waterBody}", async (
+    string waterBody, PoolSettings settings, IOptions<List<WaterBodyOptions>> waterBodies,
+    PoolDatabase database, SyncRunner runner, CancellationToken ct) =>
+{
+    var body = waterBodies.Value.FirstOrDefault(
+        w => w.Enabled && string.Equals(w.Name, waterBody, StringComparison.OrdinalIgnoreCase));
+    if (body is null)
+    {
+        return Results.NotFound(new { error = $"No water body named {waterBody}." });
+    }
+
+    if (SettingsProblem(settings) is { } problem)
+    {
+        return Results.BadRequest(new { error = problem });
+    }
+
+    await database.SaveSettingsAsync(body.Name, settings, ct);
+    await runner.RunAsync(ct);
+    return Results.Ok(settings);
 });
 
 await app.RunAsync();
@@ -167,6 +230,31 @@ static async Task RunDiscoveryAsync(WebApplication app, string[] args)
     }
 }
 
-/// <summary>Body of POST /manual. Temperature units follow Pool Math: 0 = °F, 1 = °C.</summary>
-internal sealed record ManualEntryRequest(
-    string WaterBody, double? WaterTemp, int? WaterTempUnits, double? Bor, double? Ch);
+static string? SettingsProblem(PoolSettings s)
+{
+    if (s.Volume is <= 0 or > 10_000_000)
+    {
+        return "Volume must be a positive number.";
+    }
+
+    if (s.VolumeUnit is not (0 or 1) || s.TempUnits is not (0 or 1))
+    {
+        return "Units must be 0 or 1.";
+    }
+
+    static bool Ordered(double? min, double? target, double? max) =>
+        (min is null || target is null || min <= target) && (target is null || max is null || target <= max)
+        && (min is null || max is null || min <= max);
+
+    if (!Ordered(s.SaltMin, s.SaltTarget, s.SaltMax) || s.SaltTarget is < 0 or > 10000)
+    {
+        return "Salt min, target and max must be in order, within 0–10000.";
+    }
+
+    if (!Ordered(s.BorMin, s.BorTarget, s.BorMax) || s.BorTarget is < 0 or > 100)
+    {
+        return "Borate min, target and max must be in order, within 0–100.";
+    }
+
+    return s.FcTarget is < 0 or > 40 ? "FC target must be within 0–40." : null;
+}

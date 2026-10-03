@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using PoolSync.Chemistry;
+using PoolSync.Configuration;
 using PoolSync.PoolMath;
 
 namespace PoolSync.Sync;
@@ -47,7 +48,8 @@ public sealed class SyncStatus
         LatestReadings? latest,
         string? shareUrl,
         WaterBalance? balance,
-        int tempUnits) =>
+        int tempUnits,
+        PoolSettings? settings) =>
         _waterBodies[name] = new WaterBodyStatus(
             name,
             sessionsWritten,
@@ -56,7 +58,8 @@ public sealed class SyncStatus
             latest,
             shareUrl,
             balance,
-            tempUnits);
+            tempUnits,
+            settings);
 }
 
 public sealed record WaterBodyStatus(
@@ -69,8 +72,10 @@ public sealed record WaterBodyStatus(
     string? ShareUrl,
     /// <summary>Current water, CSI and what to add to reach the ideal levels.</summary>
     WaterBalance? Balance,
-    /// <summary>The pool's preferred temperature unit in Pool Math: 0 = °F, 1 = °C.</summary>
-    int TempUnits);
+    /// <summary>The pool's preferred temperature unit: 0 = °F, 1 = °C.</summary>
+    int TempUnits,
+    /// <summary>The pool's settings, for the settings form.</summary>
+    PoolSettings? Settings);
 
 /// <summary>
 /// The most recent test run LabCOM holds for a water body, mapped onto Pool Math's parameters.

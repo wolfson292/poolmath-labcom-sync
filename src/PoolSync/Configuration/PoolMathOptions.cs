@@ -10,6 +10,18 @@ public sealed class PoolMathOptions
 
     public string ApiServer { get; set; } = "https://api.poolmathapp.com";
 
+    /// <summary>
+    /// Whether to contact Pool Math at all: share links, seeding pool settings, and the history
+    /// import. Turn off once the subscription is cancelled; everything else runs from local data.
+    /// </summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Whether to also write each test to Pool Math. Off by default: this service keeps its own
+    /// history now, and Pool Math is only a mirror for as long as the subscription lasts.
+    /// </summary>
+    public bool WriteLogs { get; set; }
+
     /// <summary>Sent as x-clientversion on every request.</summary>
     public string ClientVersion { get; set; } = "512 (512192)";
 
@@ -40,6 +52,9 @@ public sealed class PoolMathOptions
     public string TestLogRoute { get; set; } = "testlogs";
 
     public string PoolsListRoute { get; set; } = "pools/list";
+
+    /// <summary>Every log on the account (tests, chemicals added, maintenance) across all pools.</summary>
+    public string TimelineRoute { get; set; } = "timeline/list";
 
     /// <summary>
     /// Public share page for a pool; "{code}" is replaced with the pool's share code. Settable so a

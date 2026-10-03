@@ -72,6 +72,32 @@ public sealed class PoolMathClient : IPoolMathClient
         return payload?.Results?.Where(p => !p.Deleted).ToList() ?? [];
     }
 
+    public async Task<IReadOnlyList<PoolMathTimelineEntry>> GetTimelineAsync(CancellationToken ct)
+    {
+        // Like /pools/list, this takes no body. A continuation token has never been seen in practice;
+        // follow one if it appears rather than silently importing a partial history.
+        var entries = new List<PoolMathTimelineEntry>();
+        string? continuation = null;
+
+        do
+        {
+            HttpContent? content = continuation is null
+                ? null
+                : JsonContent.Create(new { continuationToken = continuation }, options: JsonOptions);
+
+            using var response = await SendAuthenticatedAsync(_options.TimelineRoute, content, ct);
+            var page = await ReadAsync<PagedResults<PoolMathTimelineEntry>>(response, ct);
+
+            entries.AddRange(page?.Results ?? []);
+            continuation = string.IsNullOrWhiteSpace(page?.ContinuationToken) || page.ContinuationToken == continuation
+                ? null
+                : page.ContinuationToken;
+        }
+        while (continuation is not null);
+
+        return entries;
+    }
+
     public async Task PushTestLogsAsync(IReadOnlyList<PoolMathTestLog> logs, CancellationToken ct)
     {
         if (logs.Count == 0)

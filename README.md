@@ -1,18 +1,19 @@
 # poolmath-labcom-sync
 
-Syncs water test results from a PoolLab photometer (via the LabCOM Cloud) into
-[Pool Math](https://troublefreepool.com/), for three bodies of water. Runs as a single
-container on a NUC.
+Keeps the water test history for three bodies of water, imports PoolLab photometer results from the
+LabCOM Cloud, and works out CSI and what to add. Started as a LabCOM → [Pool Math](https://troublefreepool.com/)
+sync; it now keeps its own history so Pool Math is optional. Runs as a single container on a NUC.
 
 ## How it works
 
 Every 15 minutes the service reads the LabCOM cloud account, groups new measurements into test
-sessions, and writes one Pool Math test log per session.
+sessions, and stores one test per session in its own database — and, if `PoolMath:WriteLogs` is on,
+copies it to Pool Math too.
 
 ```
-LabCOM Cloud (GraphQL)  ──►  group into sessions  ──►  map to Pool Math fields  ──►  POST /testlogs
-                                                                                          │
-                                        /data/state.json  ◄── high-water mark ────────────┘
+LabCOM Cloud (GraphQL)  ──►  group into sessions  ──►  /data/poolsync.db  ──►  (optional) Pool Math
+                                     │
+           /data/state.json  ◄── high-water mark
 ```
 
 A PoolLab records one measurement per parameter, a few minutes apart. Readings from the same water
@@ -24,6 +25,28 @@ measured and the test is written straight away.
 
 Duplicates are prevented by a per-water-body high-water mark on the LabCOM measurement id, stored
 in `/data/state.json`. A failed run writes nothing and retries the same readings on the next tick.
+
+## Local history, and leaving Pool Math
+
+Every test lives in `/data/poolsync.db` (SQLite): LabCOM sessions, tests typed in on the page, and
+anything imported from Pool Math. The current readings, CSI and dosing all come from there, never
+from Pool Math. Each pool's settings (volume, surface, salt cell, salt and borate targets, FC
+override, temperature unit) are kept there too, edited under **Pool settings** on its card. They
+are copied from Pool Math once, the first time the service sees the pool.
+
+To move off Pool Math:
+
+1. Press **Import Pool Math history** at the bottom of the page (or `POST /import/poolmath`). It
+   copies every test, chemical addition and maintenance entry on the account. Run it as often as you
+   like; entries already imported are skipped.
+2. Check each pool's settings and history on the page.
+3. Cancel the subscription and set `PoolMath:Enabled=false`. Nothing else changes.
+
+Imported chemical additions keep Pool Math's own chemical and unit codes; the units seen so far
+(fl oz, gal, oz) are decoded, the rest are kept as codes. Imported tests keep their weather.
+
+Tests are trusted; live sensors aren't. Readings from pool controllers can drift, so they are never
+mixed into the test history — they are compared against it instead.
 
 ## A caveat worth knowing
 
@@ -131,18 +154,19 @@ levels Pool Math recommends, with amounts for the pool's volume.
 - **Readings** — the newest value of each parameter wins, wherever it came from: the latest LabCOM
   test, Pool Math's running summary (CH and salt usually come from an older entry there), or a value
   typed in on the page. Each value shows its source and date when it isn't from the latest test.
-- **Temperature, borate and CH** — a PoolLab doesn't measure these, so the card has a form for
-  them. Saving writes a Pool Math test log containing just those values, timestamped now, so Pool Math's
-  own CSI and history pick them up too. In a dry run the log is printed instead, and the value is
-  still used on the page.
+- **Tests by hand** — **Add a test** on each card takes any reading (FC, CC, pH, TA, CYA, CH, salt,
+  borate, temperature), at the current time or a past one, with a note. A PoolLab doesn't measure
+  CH, salt, borate or temperature, so those usually come from here. Hand-entered tests can be
+  deleted from **History**; synced and imported ones can't, since they would only come back.
+- **Implausible values** — a stored value outside what any test could read (an FC of 1,000,000, a
+  pH of 12) is skipped in favour of the last good one, and hand entry refuses it.
 - **CSI** — Trouble Free Pool's published formula, which is what Pool Math uses, including the CYA
   and borate corrections to alkalinity. Tests pin it against CSI values Pool Math reported for real
   pools. The card also shows what CSI would be after the recommended changes.
 - **Targets** — TFP's recommended levels: pH 7.6–7.8, TA 60–80, CH by surface (350–550 for
   plaster/fiberglass, 50–550 for vinyl), CYA 40–50 (70–80 with a salt cell), FC from CYA (12.5% of
-  CYA, 7.5% with a salt cell). The salt and borate targets and any FC override set in the pool's Pool
-  Math settings take precedence. A pool counts as a salt pool when a salt cell model is chosen in
-  Pool Math; set `WaterBodies:N:Swg` to override that.
+  CYA, 7.5% with a salt cell). The salt and borate targets and any FC override in the pool's
+  settings take precedence, and salt and borate are only checked where the pool has a target.
 - **Doses** — liquid chlorine, muriatic acid or soda ash for pH, baking soda, calcium chloride,
   stabilizer, salt and boric acid. The pH dose comes from a carbonate model that accounts for TA,
   CYA and borate buffering, so 50 ppm of borate needs several times the acid. Parameters that can
@@ -152,10 +176,9 @@ levels Pool Math recommends, with amounts for the pool's volume.
 - **Mislabelled temperatures** — a Pool Math temperature saved as °C but above 45 is read as °F
   (81.9 °C is not pool water; 81.9 °F is), and the card says so until the entry is corrected.
 
-Set the surface per water body with `POOLSYNC_WaterBodies__N__Surface` (`Plaster`, `Fiberglass` or
-`Vinyl`; default `Plaster`) — Pool Math's own build type field isn't documented. Product strengths
-are `Balance:ChlorinePercent` (default 10) and `Balance:AcidPercent` (default 31.45; use 14.5 for
-half-strength).
+Surface, salt cell and the targets are set per pool under **Pool settings** on its card. Product
+strengths are `Balance:ChlorinePercent` (default 10) and `Balance:AcidPercent` (default 31.45; use
+14.5 for half-strength).
 
 ## Endpoints
 
@@ -164,7 +187,11 @@ half-strength).
 | `/`       | Status page: the latest readings for each water body and a **Sync now** button. |
 | `/health` | 200 while healthy, 503 after 3 consecutive failed runs. Used by the container healthcheck. |
 | `/status` | Last run, last error, and per-water-body readings as JSON.                  |
-| `POST /manual` | Saves a hand-entered reading: `{"waterBody": "Pool", "waterTemp": 84, "waterTempUnits": 0, "bor": 30, "ch": 350}` (any value may be omitted; units 0 = °F, 1 = °C). Writes it to Pool Math, then runs a sync. 400 if a value is implausible. |
+| `POST /tests` | Saves a hand-entered test: `{"waterBody": "Pool", "takenAt": null, "ph": 7.6, "waterTemp": 84, "waterTempUnits": 0, "ch": 350, "notes": "Taylor"}` (any reading may be omitted; `takenAt` null = now; units 0 = °F, 1 = °C). 400 if a value is implausible. |
+| `GET /tests?waterBody=Pool&limit=50` | A water body's test history, newest first. |
+| `DELETE /tests/{id}` | Deletes a hand-entered test. 404 for synced or imported ones. |
+| `POST /import/poolmath` | Imports the Pool Math account's whole history; repeatable. |
+| `PUT /settings/{waterBody}` | Replaces a water body's pool settings. |
 | `POST /sync` | Runs a sync immediately, writing sessions without waiting out `SessionSettleTime`. 200 with the number of logs written, 409 if a run is already in progress, 502 if the run failed. |
 
 The readings shown are the newest LabCOM holds, which is not always what has been synced — a water
@@ -220,13 +247,16 @@ to override a setting it doesn't already list, add it there too.
 | `Sync:InitialBackfill`     | `7.00:00:00`   | How far back the first run imports.              |
 | `Sync:DryRun`              | `true`         | Log what would be written, write nothing.        |
 | `Sync:StatePath`           | `/data/state.json` | Must be on the mounted volume.               |
+| `Sync:DatabasePath`        | `/data/poolsync.db` | Test history and pool settings; on the mounted volume. |
+| `PoolMath:Enabled`         | `true`         | Contact Pool Math at all (import, share links, settings seed). |
+| `PoolMath:WriteLogs`       | `false`        | Also copy each new test to Pool Math.            |
 | `Mapping:DeriveCombinedChlorine` | `true`   | CC = total chlorine − free chlorine.             |
 | `Mapping:WaterTempUnits`   | `0`            | 0 = Fahrenheit, 1 = Celsius.                     |
 | `Mapping:NoteTemplate`     | *(empty)*      | Set e.g. `Imported from PoolLab {device}` to tag logs. |
 | `Balance:ChlorinePercent`  | `10`           | Liquid chlorine strength for FC doses.           |
 | `Balance:AcidPercent`      | `31.45`        | Muriatic acid strength for pH doses.             |
-| `WaterBodies:N:Surface`    | `Plaster`      | `Plaster`, `Fiberglass` or `Vinyl`; sets the CH range. |
-| `WaterBodies:N:Swg`        | *(from Pool Math)* | Salt cell or not; changes FC and CYA targets. |
+| `WaterBodies:N:Surface`    | `Plaster`      | Initial surface for a new pool's settings; edit it on the page after. |
+| `WaterBodies:N:Swg`        | *(from Pool Math)* | Initial salt-cell setting for a new pool's settings. |
 
 ### Parameter mapping
 

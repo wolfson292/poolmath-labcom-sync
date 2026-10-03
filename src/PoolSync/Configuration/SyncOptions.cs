@@ -30,4 +30,8 @@ public sealed class SyncOptions
     /// <summary>Where sync state is persisted. Must be on a mounted volume to survive restarts.</summary>
     [Required]
     public string StatePath { get; set; } = "/data/state.json";
+
+    /// <summary>The service's own test history and pool settings. Must be on a mounted volume.</summary>
+    [Required]
+    public string DatabasePath { get; set; } = "/data/poolsync.db";
 }

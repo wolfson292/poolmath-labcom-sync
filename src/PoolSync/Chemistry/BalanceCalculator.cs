@@ -1,5 +1,4 @@
 using PoolSync.Configuration;
-using PoolSync.PoolMath;
 
 namespace PoolSync.Chemistry;
 
@@ -22,27 +21,27 @@ public sealed record PoolProfile(
 {
     public const double LitresPerGallon = 3.78541;
 
-    public static PoolProfile From(PoolMathPool? pool, WaterBodyOptions waterBody)
+    public static PoolProfile From(PoolSettings settings)
     {
-        // Pool Math's poolVolumeUnit: 0 = US gallons, otherwise litres.
-        var imperial = (pool?.PoolVolumeUnit ?? 0) == 0;
-        double? litres = pool?.Volume is > 0 and var v ? (imperial ? v * LitresPerGallon : v) : null;
+        var imperial = settings.VolumeUnit == 0;
+        double? litres = settings.Volume is > 0 and var v ? (imperial ? v * LitresPerGallon : v) : null;
 
+        // Salt and borate are checked wherever the pool has a target for them.
         return new PoolProfile(
             litres,
             imperial,
-            waterBody.Surface,
-            waterBody.Swg ?? !string.IsNullOrWhiteSpace(pool?.SwgModelId),
-            pool?.SaltMin,
-            pool?.SaltMax,
-            pool?.SaltTarget,
-            pool?.TrackSalt ?? false,
-            pool?.BorMin,
-            pool?.BorMax,
-            pool?.BorTarget,
-            pool?.TrackBor ?? false,
-            pool?.OverrideFcTarget,
-            pool?.WaterTempUnitDefault ?? 0);
+            settings.Surface,
+            settings.Swg,
+            settings.SaltMin,
+            settings.SaltMax,
+            settings.SaltTarget,
+            settings.SaltTarget is not null,
+            settings.BorMin,
+            settings.BorMax,
+            settings.BorTarget,
+            settings.BorTarget is not null,
+            settings.FcTarget,
+            settings.TempUnits);
     }
 }
 
@@ -68,7 +67,7 @@ public sealed record WaterBalance(
 /// <summary>
 /// Compares the current water against Trouble Free Pool's recommended levels, which are what Pool
 /// Math checks against, and works out how much of each product brings it back. Where the pool has its
-/// own target in Pool Math (salt, borate, an FC override) that wins.
+/// own target in its settings (salt, borate, an FC override) that wins.
 /// </summary>
 public sealed class BalanceCalculator(BalanceOptions options)
 {
@@ -95,8 +94,8 @@ public sealed class BalanceCalculator(BalanceOptions options)
         if (water.TryGetValue(WaterReadings.WaterTempC, out var temperature) && temperature.Note is not null)
         {
             notes.Add(
-                $"The water temperature was {temperature.Note}. Correct the entry in Pool Math, or save the " +
-                "current temperature below to replace it.");
+                $"The latest water temperature was {temperature.Note}. Add a test with the current " +
+                "temperature to replace it.");
         }
 
         if (tempC > WaterReadings.ImplausibleCelsius)
@@ -222,7 +221,7 @@ public sealed class BalanceCalculator(BalanceOptions options)
             Plan(PoolMathFields.CyanuricAcid, cyaTarget);
         }
 
-        // --- Salt, only where the pool has a salt target in Pool Math.
+        // --- Salt, only where the pool has a salt target.
         if (pool.SaltTarget is { } saltTarget && (pool.Swg || pool.TrackSalt))
         {
             var saltMin = pool.SaltMin ?? saltTarget - 200;
@@ -245,7 +244,7 @@ public sealed class BalanceCalculator(BalanceOptions options)
             }
         }
 
-        // --- Borate, only where the pool has a borate target in Pool Math.
+        // --- Borate, only where the pool has a borate target.
         if (pool.BorTarget is { } borTarget && borTarget > 0)
         {
             var borMin = pool.BorMin ?? Math.Max(0, borTarget - 10);
@@ -316,7 +315,7 @@ public sealed class BalanceCalculator(BalanceOptions options)
 
         if (pool.VolumeLitres is null && recommendations.Count > 0)
         {
-            notes.Add("Pool Math has no volume for this pool, so amounts can't be calculated. Set it in Pool Math.");
+            notes.Add("This pool has no volume set, so amounts can't be calculated. Set it in the pool's settings.");
         }
 
         return new WaterBalance(
@@ -347,16 +346,16 @@ public sealed class BalanceCalculator(BalanceOptions options)
 
     private static double? Round(double? value) => value is { } v ? Math.Round(v, 2) : null;
 
-    internal static string Volume(double ml, bool imperial)
+    public static string Volume(double ml, bool imperial)
     {
         if (!imperial)
         {
-            return ml < 1000 ? $"{ml:0} mL" : $"{ml / 1000:0.##} L";
+            return ml < 10 ? $"{ml:0.#} mL" : ml < 1000 ? $"{ml:0} mL" : $"{ml / 1000:0.##} L";
         }
 
         var flOz = ml / 29.5735;
-        return flOz < 128
-            ? $"{flOz:0} fl oz"
+        return flOz < 10 ? $"{flOz:0.#} fl oz"
+            : flOz < 128 ? $"{flOz:0} fl oz"
             : $"{flOz / 128:0.##} gal ({flOz:0} fl oz)";
     }
 
@@ -372,15 +371,15 @@ public sealed class BalanceCalculator(BalanceOptions options)
         return $"{weight} ({cups:0.#} cups)";
     }
 
-    internal static string Mass(double mg, bool imperial)
+    public static string Mass(double mg, bool imperial)
     {
         var grams = mg / 1000;
         if (!imperial)
         {
-            return grams < 1000 ? $"{grams:0} g" : $"{grams / 1000:0.##} kg";
+            return grams < 10 ? $"{grams:0.#} g" : grams < 1000 ? $"{grams:0} g" : $"{grams / 1000:0.##} kg";
         }
 
         var oz = grams / 28.3495;
-        return oz < 16 ? $"{oz:0.#} oz" : $"{oz / 16:0.#} lb";
+        return oz < 1 ? $"{oz:0.##} oz" : oz < 16 ? $"{oz:0.#} oz" : $"{oz / 16:0.#} lb";
     }
 }

@@ -1,7 +1,6 @@
 using PoolSync.Chemistry;
 using PoolSync.Configuration;
-using PoolSync.PoolMath;
-using PoolSync.State;
+using PoolSync.Storage;
 using PoolSync.Sync;
 using Xunit;
 
@@ -12,83 +11,89 @@ public class WaterReadingsTests
     private static readonly DateTimeOffset Old = new(2024, 2, 17, 19, 22, 0, TimeSpan.Zero);
     private static readonly DateTimeOffset Recent = new(2026, 10, 3, 17, 29, 0, TimeSpan.Zero);
 
-    private static LatestReadings LabCom(DateTimeOffset at, double? ph = null, double? ch = null) =>
-        new(at, null, null, ph, null, null, ch, null, null, null, null, null);
+    private static TestRecord Test(DateTimeOffset at, string source = TestSource.PoolMath) =>
+        new() { WaterBody = "Pool", TakenAt = at, Source = source };
+
+    private static LatestReadings Pending(DateTimeOffset at, double? ph = null) =>
+        new(at, null, null, ph, null, null, null, null, null, null, null, null);
 
     [Fact]
-    public void The_newest_value_of_each_parameter_wins()
+    public void The_newest_test_that_measured_each_parameter_wins()
     {
-        var overview = new PoolMathOverview { Ph = 7.4, PhTs = Old, Ch = 200, ChTs = Old };
+        var tests = new[]
+        {
+            Test(Old) with { Ph = 7.4, Ch = 200 },
+            Test(Recent, TestSource.LabCom) with { Ph = 8.1 },
+        };
 
-        var readings = WaterReadings.Combine(overview, LabCom(Recent, ph: 8.1), manual: null);
+        var readings = WaterReadings.FromTests(tests);
 
         Assert.Equal(new SourcedReading(8.1, ReadingSource.LabCom, Recent), readings[PoolMathFields.Ph]);
         Assert.Equal(new SourcedReading(200, ReadingSource.PoolMath, Old), readings[PoolMathFields.CalciumHardness]);
     }
 
     [Fact]
-    public void An_older_labcom_reading_does_not_replace_a_newer_pool_math_one()
+    public void Order_of_the_input_does_not_matter()
     {
-        var overview = new PoolMathOverview { Ph = 7.4, PhTs = Recent };
+        var tests = new[] { Test(Recent) with { Ph = 8.1 }, Test(Old) with { Ph = 7.4 } };
 
-        var readings = WaterReadings.Combine(overview, LabCom(Old, ph: 8.1), manual: null);
+        Assert.Equal(8.1, WaterReadings.FromTests(tests)[PoolMathFields.Ph].Value);
+    }
 
-        Assert.Equal(ReadingSource.PoolMath, readings[PoolMathFields.Ph].Source);
+    [Fact]
+    public void A_pending_labcom_session_shows_before_it_is_stored()
+    {
+        var readings = WaterReadings.FromTests([Test(Old) with { Ph = 7.4 }], Pending(Recent, ph: 8.1));
+
+        Assert.Equal(ReadingSource.LabCom, readings[PoolMathFields.Ph].Source);
+        Assert.Equal(8.1, readings[PoolMathFields.Ph].Value);
     }
 
     [Fact]
     public void Manual_temperature_is_converted_to_celsius()
     {
-        var manual = new ManualReadings { WaterTemp = 84.2, WaterTempUnits = 0, WaterTempAt = Recent };
+        var test = Test(Recent, TestSource.Manual) with { WaterTemp = 84.2, WaterTempUnits = 0 };
 
-        var readings = WaterReadings.Combine(overview: null, labCom: null, manual);
+        var reading = WaterReadings.FromTests([test])[WaterReadings.WaterTempC];
 
-        Assert.Equal(29, readings[WaterReadings.WaterTempC].Value, precision: 1);
-        Assert.Equal(ReadingSource.Manual, readings[WaterReadings.WaterTempC].Source);
+        Assert.Equal(29, reading.Value, precision: 1);
+        Assert.Equal(ReadingSource.Manual, reading.Source);
     }
 
     [Fact]
-    public void A_manual_entry_beats_its_own_copy_in_pool_math()
+    public void A_fahrenheit_number_saved_as_celsius_is_read_as_fahrenheit()
     {
-        // Saving a manual reading writes a Pool Math log with the same timestamp.
-        var manual = new ManualReadings { Bor = 30, BorAt = Recent };
-        var overview = new PoolMathOverview { Bor = 30, BorTs = Recent };
+        var test = Test(Recent) with { WaterTemp = 81.92, WaterTempUnits = 1 };
 
-        var readings = WaterReadings.Combine(overview, labCom: null, manual);
-
-        Assert.Equal(ReadingSource.Manual, readings[PoolMathFields.Borate].Source);
-    }
-
-    [Fact]
-    public void A_fahrenheit_number_saved_as_celsius_in_pool_math_is_read_as_fahrenheit()
-    {
-        var overview = new PoolMathOverview { WaterTemp = 81.92, WaterTempUnits = 1, WaterTempTs = Recent };
-
-        var reading = WaterReadings.Combine(overview, labCom: null, manual: null)[WaterReadings.WaterTempC];
+        var reading = WaterReadings.FromTests([test])[WaterReadings.WaterTempC];
 
         Assert.Equal(27.7, reading.Value, precision: 1);
-        Assert.Equal("saved in Pool Math as 81.92 °C; read as °F", reading.Note);
+        Assert.Equal("saved as 81.92 °C; read as °F", reading.Note);
     }
 
     [Fact]
     public void A_real_celsius_temperature_is_left_alone()
     {
-        var overview = new PoolMathOverview { WaterTemp = 29.2, WaterTempUnits = 1, WaterTempTs = Recent };
+        var test = Test(Recent) with { WaterTemp = 29.2, WaterTempUnits = 1 };
 
-        var reading = WaterReadings.Combine(overview, labCom: null, manual: null)[WaterReadings.WaterTempC];
+        var reading = WaterReadings.FromTests([test])[WaterReadings.WaterTempC];
 
         Assert.Equal(29.2, reading.Value);
         Assert.Null(reading.Note);
     }
 
     [Fact]
-    public void Manual_calcium_hardness_replaces_an_old_pool_math_value()
+    public void An_implausible_stored_value_is_skipped_for_an_older_good_one()
     {
-        var overview = new PoolMathOverview { Ch = 200, ChTs = Old };
-        var manual = new ManualReadings { Ch = 350, ChAt = Recent };
+        var tests = new[]
+        {
+            Test(Old) with { Fc = 4 },
+            Test(Recent) with { Fc = 1000000 },
+        };
 
-        var readings = WaterReadings.Combine(overview, labCom: null, manual);
+        var reading = WaterReadings.FromTests(tests)[PoolMathFields.FreeChlorine];
 
-        Assert.Equal(new SourcedReading(350, ReadingSource.Manual, Recent), readings[PoolMathFields.CalciumHardness]);
+        Assert.Equal(4, reading.Value);
+        Assert.Equal(Old, reading.At);
     }
 }

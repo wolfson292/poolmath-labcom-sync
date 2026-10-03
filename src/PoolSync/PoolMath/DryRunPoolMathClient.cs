@@ -27,6 +27,10 @@ public sealed class DryRunPoolMathClient(
         }
     }
 
+    // Reads pass through: a dry run imports history like a live one, it just never writes to Pool Math.
+    public Task<IReadOnlyList<PoolMathTimelineEntry>> GetTimelineAsync(CancellationToken ct) =>
+        inner.GetTimelineAsync(ct);
+
     // A read: dry runs see the same share pages a live run does.
     public Task<PoolMathPool?> GetSharedPoolAsync(string shareCode, CancellationToken ct) =>
         inner.GetSharedPoolAsync(shareCode, ct);
