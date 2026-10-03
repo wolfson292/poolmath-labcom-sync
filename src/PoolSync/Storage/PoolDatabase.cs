@@ -19,6 +19,13 @@ public static class TestSource
     public const string PoolMath = "poolmath";
 }
 
+/// <summary>Where a chemical addition or maintenance entry came from, beyond the test sources.</summary>
+public static class AdditionSource
+{
+    /// <summary>Logged automatically from a pool controller's own counters.</summary>
+    public const string Controller = "controller";
+}
+
 /// <summary>
 /// One water test. These are the high-accuracy readings that drive CSI and dosing; live sensor data,
 /// which can drift, is deliberately kept out of this table.
@@ -120,6 +127,28 @@ public sealed record MaintenanceRecord
 
     public string? ExternalId { get; init; }
 }
+
+/// <summary>
+/// One reading from a pool controller's sensor, sampled through Home Assistant. Kept apart from
+/// tests: sensors drift, so they are compared against tests and never stand in for one.
+/// </summary>
+public sealed record SensorSample(string WaterBody, string Role, string Entity, DateTimeOffset At, double Value);
+
+/// <summary>A controller sensor's reading at the moment a test was taken, beside the test's value.</summary>
+public sealed record SensorComparison(
+    string TestId,
+    string WaterBody,
+    string Role,
+    DateTimeOffset At,
+    double TestValue,
+    double SensorValue,
+    string TestSource)
+{
+    public double Delta => SensorValue - TestValue;
+}
+
+/// <summary>An alert that has been raised, so it is sent once rather than on every run.</summary>
+public sealed record AlertRecord(string Key, string Message, DateTimeOffset FirstSeen, DateTimeOffset LastSent);
 
 /// <summary>
 /// The service's own record of every test, addition and maintenance entry, plus each pool's
@@ -321,6 +350,255 @@ public sealed class PoolDatabase
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>Chemical additions for one water body, newest first.</summary>
+    public async Task<IReadOnlyList<AdditionRecord>> AdditionsAsync(string waterBody, int? limit, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, water_body, at, source, chemical, chemical_code, amount, unit, unit_code, percent,
+                   normalized, notes, external_id
+            FROM additions WHERE water_body = $body ORDER BY at DESC LIMIT $limit
+            """;
+        Add(command, "$body", waterBody);
+        Add(command, "$limit", limit ?? -1);
+
+        var list = new List<AdditionRecord>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new AdditionRecord
+            {
+                Id = reader.GetString(0),
+                WaterBody = reader.GetString(1),
+                At = Parse(reader.GetString(2)),
+                Source = reader.GetString(3),
+                Chemical = String(reader, 4),
+                ChemicalCode = reader.IsDBNull(5) ? null : reader.GetInt32(5),
+                Amount = Double(reader, 6),
+                Unit = String(reader, 7),
+                UnitCode = reader.IsDBNull(8) ? null : reader.GetInt32(8),
+                Percent = Double(reader, 9),
+                Normalized = Double(reader, 10),
+                Notes = String(reader, 11),
+                ExternalId = String(reader, 12),
+            });
+        }
+
+        return list;
+    }
+
+    /// <summary>Maintenance entries for one water body, newest first.</summary>
+    public async Task<IReadOnlyList<MaintenanceRecord>> MaintenanceAsync(string waterBody, int? limit, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, water_body, at, source, data, notes, external_id
+            FROM maintenance WHERE water_body = $body ORDER BY at DESC LIMIT $limit
+            """;
+        Add(command, "$body", waterBody);
+        Add(command, "$limit", limit ?? -1);
+
+        var list = new List<MaintenanceRecord>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new MaintenanceRecord
+            {
+                Id = reader.GetString(0),
+                WaterBody = reader.GetString(1),
+                At = Parse(reader.GetString(2)),
+                Source = reader.GetString(3),
+                Data = reader.GetString(4),
+                Notes = String(reader, 5),
+                ExternalId = String(reader, 6),
+            });
+        }
+
+        return list;
+    }
+
+    /// <summary>Deletes a hand-entered addition or maintenance entry; imported and logged-by-device ones stay.</summary>
+    public async Task<bool> DeleteManualEntryAsync(string table, string id, CancellationToken ct)
+    {
+        if (table is not ("additions" or "maintenance"))
+        {
+            throw new ArgumentOutOfRangeException(nameof(table));
+        }
+
+        await using var connection = await OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"DELETE FROM {table} WHERE id = $id AND source = $source";
+        Add(command, "$id", id);
+        Add(command, "$source", TestSource.Manual);
+        return await command.ExecuteNonQueryAsync(ct) > 0;
+    }
+
+    public async Task InsertSamplesAsync(IEnumerable<SensorSample> samples, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct);
+        foreach (var sample in samples)
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                INSERT OR IGNORE INTO sensor_samples (water_body, role, entity, at, value)
+                VALUES ($body, $role, $entity, $at, $value)
+                """;
+            Add(command, "$body", sample.WaterBody);
+            Add(command, "$role", sample.Role);
+            Add(command, "$entity", sample.Entity);
+            Add(command, "$at", Format(sample.At));
+            Add(command, "$value", sample.Value);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        await transaction.CommitAsync(ct);
+    }
+
+    /// <summary>Samples of one sensor role since a time, oldest first.</summary>
+    public async Task<IReadOnlyList<SensorSample>> SamplesAsync(
+        string waterBody, string role, DateTimeOffset since, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT water_body, role, entity, at, value FROM sensor_samples
+            WHERE water_body = $body AND role = $role AND at >= $since ORDER BY at
+            """;
+        Add(command, "$body", waterBody);
+        Add(command, "$role", role);
+        Add(command, "$since", Format(since));
+
+        var list = new List<SensorSample>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new SensorSample(
+                reader.GetString(0), reader.GetString(1), reader.GetString(2), Parse(reader.GetString(3)), reader.GetDouble(4)));
+        }
+
+        return list;
+    }
+
+    /// <summary>Drops samples older than the cutoff, so the table stays small.</summary>
+    public async Task PruneSamplesAsync(DateTimeOffset before, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM sensor_samples WHERE at < $before";
+        Add(command, "$before", Format(before));
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<bool> InsertComparisonAsync(SensorComparison comparison, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT OR IGNORE INTO sensor_comparisons (test_id, water_body, role, at, test_value, sensor_value, test_source)
+            VALUES ($test, $body, $role, $at, $testValue, $sensorValue, $source)
+            """;
+        Add(command, "$test", comparison.TestId);
+        Add(command, "$body", comparison.WaterBody);
+        Add(command, "$role", comparison.Role);
+        Add(command, "$at", Format(comparison.At));
+        Add(command, "$testValue", comparison.TestValue);
+        Add(command, "$sensorValue", comparison.SensorValue);
+        Add(command, "$source", comparison.TestSource);
+        return await command.ExecuteNonQueryAsync(ct) > 0;
+    }
+
+    /// <summary>Comparisons for one water body, newest first.</summary>
+    public async Task<IReadOnlyList<SensorComparison>> ComparisonsAsync(string waterBody, int limit, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT test_id, water_body, role, at, test_value, sensor_value, test_source FROM sensor_comparisons
+            WHERE water_body = $body ORDER BY at DESC LIMIT $limit
+            """;
+        Add(command, "$body", waterBody);
+        Add(command, "$limit", limit);
+
+        var list = new List<SensorComparison>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new SensorComparison(
+                reader.GetString(0), reader.GetString(1), reader.GetString(2), Parse(reader.GetString(3)),
+                reader.GetDouble(4), reader.GetDouble(5), reader.GetString(6)));
+        }
+
+        return list;
+    }
+
+    /// <summary>The (test, role) pairs that already have a comparison, so each is only looked up once.</summary>
+    public async Task<HashSet<string>> ComparedAsync(string waterBody, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT test_id || '|' || role FROM sensor_comparisons WHERE water_body = $body";
+        Add(command, "$body", waterBody);
+
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            set.Add(reader.GetString(0));
+        }
+
+        return set;
+    }
+
+    public async Task<IReadOnlyDictionary<string, AlertRecord>> AlertsAsync(CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT key, message, first_seen, last_sent FROM alerts";
+
+        var map = new Dictionary<string, AlertRecord>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            map[reader.GetString(0)] = new AlertRecord(
+                reader.GetString(0), reader.GetString(1), Parse(reader.GetString(2)), Parse(reader.GetString(3)));
+        }
+
+        return map;
+    }
+
+    public async Task SaveAlertAsync(AlertRecord alert, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO alerts (key, message, first_seen, last_sent) VALUES ($key, $message, $first, $last)
+            ON CONFLICT (key) DO UPDATE SET message = excluded.message, last_sent = excluded.last_sent
+            """;
+        Add(command, "$key", alert.Key);
+        Add(command, "$message", alert.Message);
+        Add(command, "$first", Format(alert.FirstSeen));
+        Add(command, "$last", Format(alert.LastSent));
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Forgets alerts no longer active, so they're sent again if they come back.</summary>
+    public async Task ClearAlertsExceptAsync(IReadOnlyCollection<string> activeKeys, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        var existing = await AlertsAsync(ct);
+        foreach (var key in existing.Keys.Where(k => !activeKeys.Contains(k)))
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "DELETE FROM alerts WHERE key = $key";
+            Add(command, "$key", key);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+    }
+
     /// <summary>Row counts per table and source, for the status page footer and import results.</summary>
     public async Task<IReadOnlyDictionary<string, long>> CountsAsync(CancellationToken ct)
     {
@@ -419,6 +697,34 @@ public sealed class PoolDatabase
                 water_body TEXT PRIMARY KEY,
                 json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sensor_samples (
+                water_body TEXT NOT NULL,
+                role TEXT NOT NULL,
+                entity TEXT NOT NULL,
+                at TEXT NOT NULL,
+                value REAL NOT NULL,
+                PRIMARY KEY (water_body, role, at)
+            );
+
+            CREATE TABLE IF NOT EXISTS sensor_comparisons (
+                test_id TEXT NOT NULL,
+                water_body TEXT NOT NULL,
+                role TEXT NOT NULL,
+                at TEXT NOT NULL,
+                test_value REAL NOT NULL,
+                sensor_value REAL NOT NULL,
+                test_source TEXT NOT NULL,
+                PRIMARY KEY (test_id, role)
+            );
+            CREATE INDEX IF NOT EXISTS comparisons_by_body_time ON sensor_comparisons (water_body, at);
+
+            CREATE TABLE IF NOT EXISTS alerts (
+                key TEXT PRIMARY KEY,
+                message TEXT NOT NULL,
+                first_seen TEXT NOT NULL,
+                last_sent TEXT NOT NULL
             );
             """;
         await command.ExecuteNonQueryAsync(ct);

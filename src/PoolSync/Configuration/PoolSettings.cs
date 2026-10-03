@@ -36,15 +36,47 @@ public sealed record PoolSettings
     /// <summary>0 = Fahrenheit, 1 = Celsius: how temperatures are shown and entered by default.</summary>
     public int TempUnits { get; init; }
 
+    /// <summary>
+    /// How often each maintenance task is due, in days; null turns that reminder off. Keys are the
+    /// task names in <see cref="MaintenanceTasks"/>.
+    /// </summary>
+    public Dictionary<string, int?> ReminderDays { get; init; } = new(StringComparer.Ordinal)
+    {
+        [MaintenanceTasks.Brushed] = 7,
+        [MaintenanceTasks.Vacuumed] = 7,
+        [MaintenanceTasks.CleanedFilter] = 90,
+    };
+
+    /// <summary>Warn when the controller's acid tank falls below this, in fl oz.</summary>
+    public double AcidTankLowOz { get; init; } = 128;
+
+    /// <summary>Warn when filter pressure is this many psi above clean, at the same pump speed.</summary>
+    public double FilterPsiRise { get; init; } = 8;
+
+    /// <summary>Warn when the controller's pH probe differs from a test by more than this.</summary>
+    public double PhDriftLimit { get; init; } = 0.2;
+
+    /// <summary>Warn when the salt cell's salt reading differs from a test by more than this, in ppm.</summary>
+    public double SaltDriftLimit { get; init; } = 400;
+
+    /// <summary>Warn when the controller's water temperature differs from a test by more than this, in °C.</summary>
+    public double TempDriftLimitC { get; init; } = 1.5;
+
     /// <summary>The settings a water body starts with when Pool Math isn't there to seed them.</summary>
-    public static PoolSettings Defaults(WaterBodyOptions waterBody) => new()
+    public static PoolSettings Defaults(WaterBodyOptions waterBody) => new PoolSettings
     {
         Surface = waterBody.Surface,
         Swg = waterBody.Swg ?? false,
-    };
+    }.WithCellReminder();
+
+    /// <summary>A salt cell needs cleaning every few months; only remind where there is one.</summary>
+    public PoolSettings WithCellReminder() =>
+        Swg && !ReminderDays.ContainsKey(MaintenanceTasks.CleanedCell)
+            ? this with { ReminderDays = new(ReminderDays, StringComparer.Ordinal) { [MaintenanceTasks.CleanedCell] = 90 } }
+            : this;
 
     /// <summary>Copies a pool's settings out of Pool Math, for the one-time seed.</summary>
-    public static PoolSettings FromPoolMath(PoolMathPool pool, WaterBodyOptions waterBody) => new()
+    public static PoolSettings FromPoolMath(PoolMathPool pool, WaterBodyOptions waterBody) => new PoolSettings
     {
         Volume = pool.Volume,
         VolumeUnit = (pool.PoolVolumeUnit ?? 0) == 0 ? 0 : 1,
@@ -58,5 +90,24 @@ public sealed record PoolSettings
         BorTarget = pool.BorTarget,
         FcTarget = pool.OverrideFcTarget,
         TempUnits = pool.WaterTempUnitDefault ?? 0,
+    }.WithCellReminder();
+}
+
+/// <summary>Maintenance tasks, as the keys of a maintenance entry's data and of reminder settings.</summary>
+public static class MaintenanceTasks
+{
+    public const string Backwashed = "backwashed";
+    public const string Brushed = "brushed";
+    public const string Vacuumed = "vacuumed";
+    public const string CleanedFilter = "cleanedFilter";
+    public const string CleanedCell = "cleanedCell";
+
+    public static readonly IReadOnlyDictionary<string, string> Labels = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        [Backwashed] = "Backwash",
+        [Brushed] = "Brush",
+        [Vacuumed] = "Vacuum",
+        [CleanedFilter] = "Clean filter",
+        [CleanedCell] = "Clean salt cell",
     };
 }

@@ -97,6 +97,16 @@
   ul.history .vals { grid-column: 1; font-variant-numeric: tabular-nums; }
   ul.history button { grid-row: 1 / span 2; grid-column: 2; align-self: center; background: none; color: var(--bad);
     border: 1px solid var(--line); padding: .15rem .5rem; font-size: .75rem; font-weight: 500; }
+  ul.alerts { list-style: none; margin: 0 0 .8rem; padding: .5rem .7rem; border-radius: .5rem;
+    background: color-mix(in srgb, var(--warn) 12%, transparent); display: grid; gap: .3rem; font-size: .85rem; }
+  ul.alerts li::before { content: "⚠ "; color: var(--warn); }
+  .ctrl { font-size: .85rem; display: grid; grid-template-columns: auto 1fr; gap: .2rem .8rem; }
+  .ctrl dt { font-size: .8rem; }
+  .ctrl dd { text-align: right; }
+  .ctrl dd.drift { color: var(--warn); font-weight: 600; }
+  .preview { grid-column: 1 / -1; font-size: .85rem; font-variant-numeric: tabular-nums; min-height: 1.2em; }
+  .due { font-size: .85rem; display: grid; gap: .2rem; margin: 0 0 .6rem; }
+  .due .over { color: var(--warn); font-weight: 600; }
   form.manual { display: grid; grid-template-columns: auto 1fr auto; gap: .4rem .5rem; align-items: center; }
   form.manual .wide { grid-column: 2 / -1; }
   form.manual label.check { grid-column: 1 / -1; display: flex; gap: .5rem; align-items: center; color: var(--ink); }
@@ -437,7 +447,7 @@
 
     const volume = num("volume", "100");
     const volumeUnit = select("volumeUnit", [["gal", "0"], ["L", "1"]], s.volumeUnit ?? 0);
-    const surface = select("surface", [["Plaster", "Plaster"], ["Fiberglass", "Fiberglass"], ["Vinyl", "Vinyl"]],
+    const surface = select("surface", [["Plaster", "Plaster"], ["Fiberglass", "Fiberglass"], ["Vinyl", "Vinyl"], ["Spa (hot tub)", "Spa"]],
       s.surface ?? "Plaster");
     surface.className = "wide";
     const tempUnits = select("tempUnits", [["°F", "0"], ["°C", "1"]], s.tempUnits ?? 0);
@@ -452,7 +462,17 @@
       saltMin: num("saltMin", "100"), saltTarget: num("saltTarget", "100"), saltMax: num("saltMax", "100"),
       borMin: num("borMin", "1"), borTarget: num("borTarget", "1"), borMax: num("borMax", "1"),
       fcTarget: num("fcTarget", "0.5"),
+      acidTankLowOz: num("acidTankLowOz", "8"),
+      filterPsiRise: num("filterPsiRise", "1"),
+      phDriftLimit: num("phDriftLimit", "0.05"),
+      saltDriftLimit: num("saltDriftLimit", "50"),
     };
+    const reminderInputs = {};
+    for (const [task, label] of Object.entries(TASKS)) {
+      const node = input("r_" + task, { type: "number", step: "1", min: "1" });
+      node.value = (s.reminderDays || {})[task] ?? "";
+      reminderInputs[task] = [label, node];
+    }
 
     form.append(
       el("label", "", "Volume"), volume, volumeUnit,
@@ -466,10 +486,19 @@
       el("label", "", "Borate target"), fields.borTarget, el("span", "unit", "ppm"),
       el("label", "", "Borate max"), fields.borMax, el("span", "unit", "ppm"),
       el("label", "", "FC target"), fields.fcTarget, el("span", "unit", "ppm"));
+    for (const [label, node] of Object.values(reminderInputs)) {
+      form.append(el("label", "", label + " every"), node, el("span", "unit", "days"));
+    }
+    form.append(
+      el("label", "", "Acid tank low"), fields.acidTankLowOz, el("span", "unit", "fl oz"),
+      el("label", "", "Filter rise"), fields.filterPsiRise, el("span", "unit", "psi"),
+      el("label", "", "pH probe drift"), fields.phDriftLimit, el("span", "unit", "pH"),
+      el("label", "", "Salt drift"), fields.saltDriftLimit, el("span", "unit", "ppm"));
 
     const save = el("button", "", "Save settings");
     save.type = "submit";
-    const fmsg = el("div", "fmsg", "Leave a target empty to skip that check. FC target empty = follow CYA.");
+    const fmsg = el("div", "fmsg", "Leave a target empty to skip that check. FC target empty = follow CYA. " +
+      "Leave a reminder empty to turn it off.");
     form.append(save, fmsg);
 
     form.addEventListener("submit", async (event) => {
@@ -480,12 +509,291 @@
         swg: swg.checked, tempUnits: Number(tempUnits.value),
       };
       for (const [key, node] of Object.entries(fields)) payload[key] = value(node);
+      for (const key of ["acidTankLowOz", "filterPsiRise", "phDriftLimit", "saltDriftLimit"]) {
+        if (payload[key] === null) delete payload[key];
+      }
+      payload.tempDriftLimitC = s.tempDriftLimitC;
+      payload.reminderDays = {};
+      for (const [task, [, node]] of Object.entries(reminderInputs)) payload.reminderDays[task] = value(node);
       if (await submit(form, fmsg, save, "settings/" + encodeURIComponent(body.name), "PUT", payload)) {
         await refresh(true);
       }
     });
 
     return form;
+  }
+
+  const TASKS = { backwashed: "Backwash", brushed: "Brush", vacuumed: "Vacuum", cleanedFilter: "Clean filter",
+    cleanedCell: "Clean salt cell" };
+
+  // The product list and units, loaded once.
+  let catalog = null;
+  const catalogReady = fetch("chemicals").then((r) => r.json()).then((c) => { catalog = c; });
+
+  const short = (iso) => {
+    const d = new Date(iso);
+    return d.toLocaleDateString(undefined, d.getFullYear() === new Date().getFullYear()
+      ? { month: "short", day: "numeric" } : { month: "short", day: "numeric", year: "numeric" });
+  };
+
+  function alertsBlock(body) {
+    const items = [];
+    const c = body.controller;
+    if (c) {
+      for (const issue of c.issues || []) if (issue.severity === "warning") items.push(issue.message);
+      if (c.error) items.push("Controller: " + c.error);
+    }
+    for (const r of body.reminders || []) {
+      if (r.overdue) items.push(r.label + " is due (last done " + short(r.lastDone) + ").");
+    }
+    if (!items.length) return null;
+    const ul = el("ul", "alerts");
+    // Messages start with the pool name, which the card already shows.
+    for (const text of items) ul.appendChild(el("li", "", text.replace(body.name + ": ", "")));
+    return ul;
+  }
+
+  const ROLE_LABELS = {
+    ph: "pH probe", orp: "ORP", waterTemp: "Water temp", salt: "Salt cell salt", filterPsi: "Filter pressure",
+    pumpRpm: "Pump speed", pumpWatts: "Pump power", swgPercent: "Salt cell output",
+    acidDosedToday: "Acid dosed today", acidTank: "Acid tank",
+  };
+
+  function sensorText(r, tempUnits) {
+    switch (r.role) {
+      case "ph": return r.value.toFixed(2);
+      case "orp": return Math.round(r.value) + " mV";
+      case "waterTemp": return temp(r.value, tempUnits);
+      case "salt": return Math.round(r.value) + " ppm";
+      case "filterPsi": return r.value.toFixed(1) + " psi";
+      case "pumpRpm": return Math.round(r.value) + " rpm";
+      case "pumpWatts": return Math.round(r.value) + " W";
+      case "swgPercent": return Math.round(r.value) + "%";
+      case "acidDosedToday": return round(r.value) + " fl oz";
+      case "acidTank": return Math.round(r.value) + " fl oz";
+      default: return String(round(r.value));
+    }
+  }
+
+  function deltaText(c, tempUnits) {
+    if (c.role === "waterTemp") {
+      const d = tempUnits === 1 ? c.delta : c.delta * 9 / 5;
+      return (d >= 0 ? "+" : "−") + Math.abs(d).toFixed(1) + (tempUnits === 1 ? " °C" : " °F");
+    }
+    const digits = c.role === "ph" ? 2 : 0;
+    return (c.delta >= 0 ? "+" : "−") + Math.abs(c.delta).toFixed(digits) + (c.role === "salt" ? " ppm" : "");
+  }
+
+  function controllerSection(body) {
+    const c = body.controller;
+    const wrap = el("div");
+    if (!c.connected) {
+      wrap.appendChild(el("p", "none", c.error || "Not connected."));
+      return wrap;
+    }
+    const dl = el("dl", "ctrl");
+    for (const r of c.readings) {
+      const dd = el("dd", "", sensorText(r, body.tempUnits));
+      if (r.role === "filterPsi" && c.filterCleanPsi) dd.appendChild(el("small", "", "clean " + c.filterCleanPsi.toFixed(1) + " psi"));
+      dl.append(el("dt", "", ROLE_LABELS[r.role] || r.role), dd);
+    }
+    wrap.appendChild(dl);
+
+    if (c.comparisons && c.comparisons.length) {
+      wrap.appendChild(el("h3", "", "Sensors vs tests"));
+      const cmp = el("dl", "ctrl");
+      for (const x of c.comparisons) {
+        const dd = el("dd", x.drifted ? "drift" : "", deltaText(x, body.tempUnits));
+        dd.appendChild(el("small", "", "vs " + (SOURCE_NAMES[x.testSource] || x.testSource) + " " + short(x.at)));
+        cmp.append(el("dt", "", ROLE_LABELS[x.role] || x.role), dd);
+      }
+      wrap.appendChild(cmp);
+    }
+
+    for (const f of c.faults || []) wrap.appendChild(el("p", "err", f.name));
+    return wrap;
+  }
+
+  function additionForm(body) {
+    const form = el("form", "manual");
+    const chemical = el("select");
+    chemical.name = "chemical";
+    const amount = input("amount", { type: "number", step: "any", min: "0" });
+    const unit = el("select");
+    unit.name = "unit";
+    const percent = input("percent", { type: "number", step: "0.1", min: "0" });
+    const percentLabel = el("label", "", "Strength");
+    const percentUnit = el("span", "unit", "%");
+    const when = input("when", { type: "datetime-local", inputMode: "text", placeholder: "" });
+    when.className = "wide";
+    const notes = input("notes", { type: "text", inputMode: "text", placeholder: "optional" });
+    notes.className = "wide";
+    const preview = el("div", "preview");
+
+    form.append(
+      el("label", "", "Product"), chemical, el("span"),
+      el("label", "", "Amount"), amount, unit,
+      percentLabel, percent, percentUnit,
+      el("label", "", "When"), when,
+      el("label", "", "Notes"), notes,
+      preview);
+
+    const save = el("button", "", "Log it");
+    save.type = "submit";
+    const fmsg = el("div", "fmsg", "The preview shows the effect on the current readings before you add it.");
+    form.append(save, fmsg);
+
+    const current = () => catalog.chemicals.find((c) => c.name === chemical.value);
+    const fillUnits = () => {
+      const c = current();
+      const units = c.liquid ? catalog.liquidUnits : [...catalog.solidUnits, ...(c.name === "Stabilizer" ? ["cup"] : [])];
+      unit.replaceChildren(...units.map((u) => new Option(u, u)));
+      unit.value = c.liquid ? "fl oz" : "lb";
+      const strength = c.defaultPercent !== null && c.defaultPercent !== undefined;
+      for (const node of [percentLabel, percent, percentUnit]) node.style.display = strength ? "" : "none";
+      percent.value = strength ? c.defaultPercent : "";
+    };
+
+    let timer = null;
+    const payload = () => ({
+      waterBody: body.name, chemical: chemical.value, amount: Number(amount.value), unit: unit.value,
+      percent: percent.value === "" ? null : Number(percent.value),
+      at: when.value ? new Date(when.value).toISOString() : null, notes: notes.value || null,
+    });
+    const updatePreview = () => {
+      clearTimeout(timer);
+      if (!amount.value || Number(amount.value) <= 0) { preview.textContent = ""; return; }
+      timer = setTimeout(async () => {
+        const res = await fetch("effects", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload()) });
+        const r = await res.json().catch(() => ({}));
+        if (!res.ok) { preview.textContent = r.error || ""; return; }
+        const parts = r.effects.map((e) => e.label + " " + round(e.from) + " → " + round(e.to));
+        if (r.csiBefore !== null && r.csiAfter !== null && r.csiBefore !== r.csiAfter) {
+          parts.push("CSI " + signed(r.csiBefore) + " → " + signed(r.csiAfter));
+        }
+        preview.textContent = parts.length ? parts.join(" · ") : (r.note || "No effect on tracked readings.");
+        if (r.note && parts.length) preview.textContent += " (" + r.note + ")";
+      }, 300);
+    };
+
+    catalogReady.then(() => {
+      chemical.replaceChildren(...catalog.chemicals.map((c) => new Option(c.name, c.name)));
+      fillUnits();
+    });
+    chemical.addEventListener("change", () => { fillUnits(); updatePreview(); });
+    for (const node of [amount, unit, percent]) node.addEventListener("input", updatePreview);
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (await submit(form, fmsg, save, "additions", "POST", payload())) await refresh(true);
+    });
+    return form;
+  }
+
+  function maintenanceForm(body) {
+    const form = el("form", "manual");
+    const due = el("div", "due");
+    for (const r of body.reminders || []) {
+      const line = el("div", r.overdue ? "over" : "");
+      line.textContent = r.label + ": " + (r.lastDone ? "done " + short(r.lastDone) + ", " + (r.overdue ? "due " : "next ") +
+        short(r.dueAt) : "not logged yet") + " (every " + r.days + " days)";
+      due.appendChild(line);
+    }
+    form.appendChild(due);
+    due.style.gridColumn = "1 / -1";
+
+    const boxes = {};
+    for (const [task, label] of Object.entries(TASKS)) {
+      const box = el("input");
+      box.type = "checkbox";
+      const l = el("label", "check");
+      l.append(box, document.createTextNode(label));
+      form.appendChild(l);
+      boxes[task] = box;
+    }
+    const psi = input("psi", { type: "number", step: "0.5", min: "0" });
+    const when = input("when", { type: "datetime-local", inputMode: "text", placeholder: "" });
+    when.className = "wide";
+    const notes = input("notes", { type: "text", inputMode: "text", placeholder: "optional" });
+    notes.className = "wide";
+    form.append(
+      el("label", "", "Filter"), psi, el("span", "unit", "psi"),
+      el("label", "", "When"), when,
+      el("label", "", "Notes"), notes);
+
+    const save = el("button", "", "Log maintenance");
+    save.type = "submit";
+    const fmsg = el("div", "fmsg");
+    form.append(save, fmsg);
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const payload = {
+        waterBody: body.name,
+        tasks: Object.entries(boxes).filter(([, b]) => b.checked).map(([t]) => t),
+        filterPsi: psi.value === "" ? null : Number(psi.value),
+        at: when.value ? new Date(when.value).toISOString() : null,
+        notes: notes.value || null,
+      };
+      if (await submit(form, fmsg, save, "maintenance", "POST", payload)) await refresh(true);
+    });
+    return form;
+  }
+
+  function describeAddition(a) {
+    const name = a.chemical || (a.chemicalCode !== null && a.chemicalCode !== undefined
+      ? "Pool Math chemical #" + a.chemicalCode : "Chemical");
+    const amount = a.amount !== null && a.amount !== undefined
+      ? round(a.amount) + " " + (a.unit || (a.unitCode !== null ? "unit #" + a.unitCode : "")) : "";
+    return name + (a.percent ? " " + a.percent + "%" : "") + (amount ? ": " + amount : "");
+  }
+
+  function describeMaintenance(m) {
+    const data = JSON.parse(m.data);
+    const parts = Object.entries(data).filter(([k, v]) => v === true && TASKS[k]).map(([k]) => TASKS[k]);
+    if (data.pressure !== undefined) parts.push("filter " + data.pressure + " psi");
+    if (data.acidRefilledOz !== undefined) parts.push("acid tank +" + data.acidRefilledOz + " fl oz");
+    for (const k of ["flowRate", "pumpRuntime", "swgCellPercent"]) {
+      if (data[k] !== undefined) parts.push(k + " " + data[k]);
+    }
+    return parts.join(" · ") || "Maintenance";
+  }
+
+  function logSection(body) {
+    const wrap = el("div");
+    wrap.appendChild(el("p", "none", "Loading…"));
+    const q = "?waterBody=" + encodeURIComponent(body.name) + "&limit=30";
+    Promise.all([fetch("additions" + q).then((r) => r.json()), fetch("maintenance" + q).then((r) => r.json())])
+      .then(([additions, maintenance]) => {
+        const entries = [
+          ...additions.map((a) => ({ kind: "additions", at: a.at, text: describeAddition(a), item: a })),
+          ...maintenance.map((m) => ({ kind: "maintenance", at: m.at, text: describeMaintenance(m), item: m })),
+        ].sort((x, y) => new Date(y.at) - new Date(x.at)).slice(0, 40);
+        if (!entries.length) { wrap.replaceChildren(el("p", "none", "Nothing logged yet.")); return; }
+        const list = el("ul", "history");
+        for (const e of entries) {
+          const li = el("li");
+          li.appendChild(el("span", "vals", e.text));
+          li.appendChild(el("span", "meta", new Date(e.at).toLocaleString() + " · " +
+            ({ manual: "Manual", poolmath: "Pool Math", controller: "Controller" }[e.item.source] || e.item.source) +
+            (e.item.notes ? " · " + e.item.notes : "")));
+          if (e.item.source === "manual") {
+            const del = el("button", "", "Delete");
+            del.type = "button";
+            del.addEventListener("click", async () => {
+              if (!confirm("Delete this entry?")) return;
+              const res = await fetch(e.kind + "/" + encodeURIComponent(e.item.id), { method: "DELETE" });
+              if (res.ok) { li.remove(); refresh(true); }
+            });
+            li.appendChild(del);
+          }
+          list.appendChild(li);
+        }
+        wrap.replaceChildren(list);
+      })
+      .catch((err) => wrap.replaceChildren(el("p", "err", "Could not load the log: " + err.message)));
+    return wrap;
   }
 
   function card(body) {
@@ -509,14 +817,23 @@
       ? "Tested " + ago(latest.takenAt) + " · " + new Date(latest.takenAt).toLocaleString()
       : "No LabCOM readings yet"));
 
+    const alerts = alertsBlock(body);
+    if (alerts) card.appendChild(alerts);
+
     const csi = csiLine(body.balance);
     if (csi) card.appendChild(csi);
 
     card.appendChild(readings(body));
     card.appendChild(balanceSection(body));
 
+    if (body.controller) {
+      card.appendChild(section(body, "controller", "Controller", () => controllerSection(body)));
+    }
     card.appendChild(section(body, "add", "Add a test", () => testForm(body)));
-    card.appendChild(section(body, "history", "History", () => historySection(body)));
+    card.appendChild(section(body, "chem", "Log a chemical", () => additionForm(body)));
+    card.appendChild(section(body, "maint", "Log maintenance", () => maintenanceForm(body)));
+    card.appendChild(section(body, "history", "Test history", () => historySection(body)));
+    card.appendChild(section(body, "log", "Chemicals & maintenance", () => logSection(body)));
     card.appendChild(section(body, "settings", "Pool settings", () => settingsSection(body)));
 
     return card;

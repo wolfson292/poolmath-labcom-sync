@@ -97,6 +97,27 @@ public static class WaterChemistry
         return (low + high) / 2;
     }
 
+    /// <summary>
+    /// The pH and TA after a change to the water: strong base or acid added (alkalinity, meq/L),
+    /// carbonate added (mmol/L), and borate or CYA added (ppm). Carbon dioxide is assumed to stay
+    /// in the water while it mixes, as for the doses.
+    /// </summary>
+    public static (double Ph, double Ta) After(
+        double ph, double ta, double cya, double borate, double ch, double salt, double tempC,
+        double addedAlkalinityMeq = 0, double addedCarbonMmol = 0, double addedBorate = 0, double addedCya = 0)
+    {
+        var model = Carbonate.From(ph, ta, cya, borate, ch, salt, tempC);
+        var alkalinity = model.TotalAlkalinity(ph) + addedAlkalinityMeq;
+        var changed = model.WithCarbon(addedCarbonMmol) with
+        {
+            Borate = model.Borate + addedBorate,
+            Cya = model.Cya + addedCya,
+        };
+
+        var newPh = changed.SolvePh(alkalinity);
+        return (newPh, changed.TotalAlkalinity(newPh) * CaCO3PerMeq);
+    }
+
     private static double CyaAlkalinity(double cya, double ph) =>
         0.38772 * cya / (1 + Math.Pow(10, 6.83 - ph));
 

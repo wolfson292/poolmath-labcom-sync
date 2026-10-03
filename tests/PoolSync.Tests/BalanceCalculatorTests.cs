@@ -179,4 +179,15 @@ public class BalanceCalculatorTests
         Assert.Equal("0.8 oz", BalanceCalculator.Mass(22_680, imperial: true));
         Assert.Equal("0.03 oz", BalanceCalculator.Mass(850, imperial: true));
     }
+
+    [Fact]
+    public void A_spa_gets_spa_calcium_and_cya_targets()
+    {
+        var balance = Calculator.Calculate(Water(ch: 30, cya: 30), Pool(surface: PoolSurface.Spa, swg: true));
+
+        var ch = balance.Targets.Single(t => t.Key == PoolMathFields.CalciumHardness);
+        var cya = balance.Targets.Single(t => t.Key == PoolMathFields.CyanuricAcid);
+        Assert.Equal((100, 250, 150), (ch.Min, ch.Max, ch.Target));
+        Assert.Equal("ok", cya.Status);
+    }
 }

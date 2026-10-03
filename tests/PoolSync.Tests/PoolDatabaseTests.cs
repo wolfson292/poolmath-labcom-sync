@@ -86,7 +86,12 @@ public sealed class PoolDatabaseTests : IDisposable
         await _database.SaveSettingsAsync("Allaire", settings, default);
         await _database.SaveSettingsAsync("Allaire", settings with { Volume = 24000 }, default);
 
-        Assert.Equal(settings with { Volume = 24000 }, await _database.SettingsAsync("Allaire", default));
+        // Compared as JSON: record equality would compare the reminder dictionary by reference.
+        var stored = await _database.SettingsAsync("Allaire", default);
+        Assert.Equal(
+            System.Text.Json.JsonSerializer.Serialize(settings with { Volume = 24000 }),
+            System.Text.Json.JsonSerializer.Serialize(stored));
+        Assert.Equal(7, stored!.ReminderDays[MaintenanceTasks.Brushed]);
     }
 
     [Fact]

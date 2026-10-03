@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Options;
 using PoolSync.Chemistry;
 using PoolSync.Configuration;
+using PoolSync.Controllers;
+using PoolSync.HomeAssistant;
 using PoolSync.LabCom;
 using PoolSync.PoolMath;
 using PoolSync.State;
@@ -57,6 +59,8 @@ public sealed class SyncRunner(
     IOptions<BalanceOptions> balanceOptions,
     IOptions<List<WaterBodyOptions>> waterBodies,
     PoolDatabase database,
+    ControllerMonitor controllers,
+    HomeAssistantPublisher homeAssistant,
     SyncStatus status,
     ILogger<SyncRunner> logger)
 {
@@ -156,14 +160,17 @@ public sealed class SyncRunner(
             ? await PoolsAsync(poolMath, enabled, ct)
             : new Dictionary<string, PoolMathPool>(StringComparer.Ordinal);
         var written = 0;
+        var run = new RunContext(controllers.NewRun(), now);
 
         try
         {
             foreach (var waterBody in enabled)
             {
                 written += await SyncWaterBodyAsync(
-                    waterBody, cloudAccount, state, mapper, poolMath, pools, now, skipSettleTime, ct);
+                    waterBody, cloudAccount, state, mapper, poolMath, pools, run, skipSettleTime, ct);
             }
+
+            await AfterRunAsync(run, ct);
         }
         finally
         {
@@ -195,10 +202,11 @@ public sealed class SyncRunner(
         ReadingMapper mapper,
         IPoolMathClient poolMath,
         IReadOnlyDictionary<string, PoolMathPool> pools,
-        DateTimeOffset now,
+        RunContext run,
         bool skipSettleTime,
         CancellationToken ct)
     {
+        var now = run.Now;
         var pool = pools.GetValueOrDefault(waterBody.PoolMathPoolId);
         var shareUrl = ShareUrl(pool);
         var bodyState = state.For(waterBody.LabComAccountId);
@@ -215,7 +223,7 @@ public sealed class SyncRunner(
                 waterBody.LabComAccountId,
                 waterBody.Name,
                 string.Join(", ", cloudAccount.Accounts.Select(a => $"{a.Id} ({a.DisplayName})")));
-            await RecordStatusAsync(waterBody, pool, 0, null, null, null, shareUrl, ct);
+            await RecordStatusAsync(waterBody, pool, 0, null, null, null, shareUrl, run, ct);
             return 0;
         }
 
@@ -237,7 +245,7 @@ public sealed class SyncRunner(
         {
             logger.LogDebug("{Name}: no new LabCOM measurements.", waterBody.Name);
             await RecordStatusAsync(
-                waterBody, pool, 0, bodyState.LastSessionTimestamp, latest, Pending(latest, latestMaxId, bodyState), shareUrl, ct);
+                waterBody, pool, 0, bodyState.LastSessionTimestamp, latest, Pending(latest, latestMaxId, bodyState), shareUrl, run, ct);
             return 0;
         }
 
@@ -254,7 +262,7 @@ public sealed class SyncRunner(
                 waterBody.Name,
                 candidates.Count);
             await RecordStatusAsync(
-                waterBody, pool, 0, bodyState.LastSessionTimestamp, latest, Pending(latest, latestMaxId, bodyState), shareUrl, ct);
+                waterBody, pool, 0, bodyState.LastSessionTimestamp, latest, Pending(latest, latestMaxId, bodyState), shareUrl, run, ct);
             return 0;
         }
 
@@ -310,7 +318,7 @@ public sealed class SyncRunner(
             bodyState.LastMeasurementId);
 
         await RecordStatusAsync(
-            waterBody, pool, written, bodyState.LastSessionTimestamp, latest, Pending(latest, latestMaxId, bodyState), shareUrl, ct);
+            waterBody, pool, written, bodyState.LastSessionTimestamp, latest, Pending(latest, latestMaxId, bodyState), shareUrl, run, ct);
 
         return written;
     }
@@ -374,7 +382,7 @@ public sealed class SyncRunner(
     {
         if (await database.SettingsAsync(waterBody.Name, ct) is { } saved)
         {
-            return saved;
+            return saved.WithCellReminder();
         }
 
         if (pool is null)
@@ -388,6 +396,12 @@ public sealed class SyncRunner(
         return seeded;
     }
 
+    /// <summary>Shared by every water body in one run: HA states fetched once, issues collected for alerting.</summary>
+    private sealed record RunContext(ControllerMonitor.StatesCache States, DateTimeOffset Now)
+    {
+        public List<HealthIssue> Issues { get; } = [];
+    }
+
     private async Task RecordStatusAsync(
         WaterBodyOptions waterBody,
         PoolMathPool? pool,
@@ -396,14 +410,57 @@ public sealed class SyncRunner(
         LatestReadings? latest,
         LatestReadings? pending,
         string? shareUrl,
+        RunContext run,
         CancellationToken ct)
     {
         var settings = await SettingsAsync(waterBody, pool, ct);
         var tests = await database.TestsAsync(waterBody.Name, limit: null, ct);
         var balance = _balance.Calculate(WaterReadings.FromTests(tests, pending), PoolProfile.From(settings));
+        var maintenance = await database.MaintenanceAsync(waterBody.Name, limit: 500, ct);
+        var reminders = EquipmentHealth.Reminders(maintenance, settings, run.Now);
+
+        // The controller and Home Assistant are extras: their failures show on the page but never
+        // fail the sync.
+        ControllerStatus? controller = null;
+        try
+        {
+            controller = await controllers.CheckAsync(waterBody, settings, tests, maintenance, run.States, run.Now, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "{Name}: controller check failed.", waterBody.Name);
+            controller = new ControllerStatus(
+                waterBody.Controller?.Device ?? "", waterBody.Controller?.HomeAssistant ?? 0, false, ex.Message, [], [], [], [], null);
+        }
+
+        run.Issues.AddRange(controller?.Issues ?? []);
+        run.Issues.AddRange(reminders.Where(r => r.Overdue).Select(r => new HealthIssue(
+            $"{waterBody.Name}:due:{r.Task}",
+            HealthIssue.Warning,
+            $"{waterBody.Name}: {r.Label.ToLowerInvariant()} is due (last done {ShortDate(r.LastDone!.Value, run.Now)}).")));
+
+        await homeAssistant.PublishAsync(waterBody.Name, balance, ct);
 
         status.RecordWaterBody(
-            waterBody.Name, written, lastSyncedReading, latest, shareUrl, balance, settings.TempUnits, settings);
+            waterBody.Name, written, lastSyncedReading, latest, shareUrl, balance, settings.TempUnits, settings,
+            controller, reminders);
+    }
+
+    /// <summary>"Sep 1", or "Aug 25, 2019" when it isn't this year.</summary>
+    private static string ShortDate(DateTimeOffset at, DateTimeOffset now) =>
+        at.ToLocalTime().Year == now.ToLocalTime().Year ? $"{at.ToLocalTime():MMM d}" : $"{at.ToLocalTime():MMM d, yyyy}";
+
+    private async Task AfterRunAsync(RunContext run, CancellationToken ct)
+    {
+        try
+        {
+            await homeAssistant.AlertAsync(run.Issues, run.Now, ct);
+            await controllers.PruneAsync(run.Now, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Sending alerts failed.");
+        }
     }
 
     /// <summary>The latest LabCOM session, if it hasn't been stored yet because it's still settling.</summary>

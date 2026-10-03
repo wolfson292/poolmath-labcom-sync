@@ -180,6 +180,40 @@ Surface, salt cell and the targets are set per pool under **Pool settings** on i
 strengths are `Balance:ChlorinePercent` (default 10) and `Balance:AcidPercent` (default 31.45; use
 14.5 for half-strength).
 
+## Logs, reminders and pool controllers
+
+**Chemicals and maintenance.** Each card can log a chemical added (liquid chlorine, acid, baking
+soda, soda ash, calcium chloride, stabilizer — by weight or by the cup — salt, boric acid, borax,
+cal-hypo, dichlor, trichlor) and maintenance (backwash, brush, vacuum, filter clean, salt cell
+clean, filter pressure). While you type an amount, the form previews the effect on the current
+readings — FC, CYA, CH, salt and borate directly, and pH and TA through the same carbonate model as
+the doses — and on CSI. Imported Pool Math chemical entries keep Pool Math's numeric codes.
+
+**Reminders.** Each maintenance task can have an interval under **Pool settings** (brush and vacuum
+7 days, filter clean 90, and salt cell clean 90 on salt pools by default). A task is due that long
+after it was last logged; one never logged isn't nagged about.
+
+**Pool controllers.** Set `WaterBodies:N:Controller:HomeAssistant` (instance index) and
+`Controller:Device` (the ESPHome device name in entity ids, e.g. `pool_antenna`), and the service
+finds the controller's sensors in Home Assistant by name: pH probe, ORP, water temperature (a spa's
+heater counts), salt cell salt and output, filter pressure, pump speed and power, and the acid
+doser's counters. Every sync it:
+
+- **samples** each sensor into its own table — never into the test history, since probes drift;
+- **compares** each test from the last 30 days with what the controller read at that moment
+  (averaged over ±10 minutes of HA history) and shows the difference, warning past the pool's limit
+  (pH 0.2, salt 400 ppm, 1.5 °C by default);
+- **logs acid doses** from the doser's "dosed today" counter as additions, and tank refills as
+  maintenance — read each run, since HA doesn't keep these counters' history;
+- **checks the equipment**: active fault flags (salt cell alarms, dose faults), the acid tank below
+  its low mark, filter pressure 8 psi above clean at the same pump speed, and a pump drawing 25% more
+  or less power than usual for its speed.
+
+**Alerts and entities.** Warnings and overdue reminders go to Home Assistant instance 0's notify
+service (`notify.all_devices`), once, then daily while they last. Each water body's CSI (with the
+recommendations as attributes) and current readings are published as `sensor.poolsync_<pool>_*`
+entities, refreshed every sync.
+
 ## Endpoints
 
 | Path      | Purpose                                                                    |
@@ -192,6 +226,10 @@ strengths are `Balance:ChlorinePercent` (default 10) and `Balance:AcidPercent` (
 | `DELETE /tests/{id}` | Deletes a hand-entered test. 404 for synced or imported ones. |
 | `POST /import/poolmath` | Imports the Pool Math account's whole history; repeatable. |
 | `PUT /settings/{waterBody}` | Replaces a water body's pool settings. |
+| `GET/POST /additions`, `DELETE /additions/{id}` | Chemical additions; only hand-entered ones can be deleted. |
+| `POST /effects` | Previews an addition's effect on the current readings; saves nothing. |
+| `GET/POST /maintenance`, `DELETE /maintenance/{id}` | Maintenance entries. |
+| `GET /chemicals` | The products and units the forms offer. |
 | `POST /sync` | Runs a sync immediately, writing sessions without waiting out `SessionSettleTime`. 200 with the number of logs written, 409 if a run is already in progress, 502 if the run failed. |
 
 The readings shown are the newest LabCOM holds, which is not always what has been synced — a water

@@ -12,10 +12,13 @@ public sealed class BalanceOptions
     public double AcidPercent { get; set; } = 31.45;
 }
 
-/// <summary>Pool surface, which sets the calcium hardness range.</summary>
+/// <summary>Pool surface, which sets the calcium hardness range (and, for a spa, CYA too).</summary>
 public enum PoolSurface
 {
     Plaster,
     Fiberglass,
     Vinyl,
+
+    /// <summary>An acrylic hot tub: lower calcium to avoid foaming, and moderate CYA.</summary>
+    Spa,
 }

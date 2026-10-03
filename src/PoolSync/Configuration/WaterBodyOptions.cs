@@ -22,4 +22,20 @@ public sealed class WaterBodyOptions
     /// follows whether a salt cell model is chosen in the pool's Pool Math settings.
     /// </summary>
     public bool? Swg { get; set; }
+
+    /// <summary>The pool controller that reports this water body's sensors, if any.</summary>
+    public ControllerOptions? Controller { get; set; }
+}
+
+/// <summary>Where a water body's controller shows up in Home Assistant.</summary>
+public sealed class ControllerOptions
+{
+    /// <summary>Index into the HomeAssistant list: the instance this controller reports to.</summary>
+    public int HomeAssistant { get; set; }
+
+    /// <summary>
+    /// The ESPHome device name as it appears in entity ids, e.g. "pool_antenna": every entity whose
+    /// id contains it is considered, and sensors are picked out by their names.
+    /// </summary>
+    public string? Device { get; set; }
 }

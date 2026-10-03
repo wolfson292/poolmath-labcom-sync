@@ -182,7 +182,13 @@ public sealed class BalanceCalculator(BalanceOptions options)
         }
 
         // --- Calcium hardness, by surface.
-        var (chMin, chMax, chTarget) = pool.Surface == PoolSurface.Vinyl ? (50.0, 550.0, 50.0) : (350.0, 550.0, 400.0);
+        var (chMin, chMax, chTarget) = pool.Surface switch
+        {
+            PoolSurface.Vinyl => (50.0, 550.0, 50.0),
+            // Hot tubs foam with much calcium, but need some to protect the heater.
+            PoolSurface.Spa => (100.0, 250.0, 150.0),
+            _ => (350.0, 550.0, 400.0),
+        };
         targets.Add(Target(PoolMathFields.CalciumHardness, "CH", chMin, chMax, chTarget, ch));
 
         if (ch is { } hard && hard < chMin)
@@ -202,7 +208,10 @@ public sealed class BalanceCalculator(BalanceOptions options)
         }
 
         // --- CYA, higher for a salt cell.
-        var (cyaMin, cyaMax, cyaTarget) = pool.Swg ? (70.0, 80.0, 75.0) : (40.0, 50.0, 45.0);
+        var (cyaMin, cyaMax, cyaTarget) =
+            pool.Surface == PoolSurface.Spa ? (30.0, 50.0, 40.0)
+            : pool.Swg ? (70.0, 80.0, 75.0)
+            : (40.0, 50.0, 45.0);
         targets.Add(Target(PoolMathFields.CyanuricAcid, "CYA", cyaMin, cyaMax, cyaTarget, cya));
 
         if (cya is { } stab && stab < cyaMin)

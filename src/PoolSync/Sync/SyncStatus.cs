@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using PoolSync.Chemistry;
 using PoolSync.Configuration;
+using PoolSync.Controllers;
 using PoolSync.PoolMath;
 
 namespace PoolSync.Sync;
@@ -49,7 +50,9 @@ public sealed class SyncStatus
         string? shareUrl,
         WaterBalance? balance,
         int tempUnits,
-        PoolSettings? settings) =>
+        PoolSettings? settings,
+        ControllerStatus? controller,
+        IReadOnlyList<Reminder> reminders) =>
         _waterBodies[name] = new WaterBodyStatus(
             name,
             sessionsWritten,
@@ -59,7 +62,9 @@ public sealed class SyncStatus
             shareUrl,
             balance,
             tempUnits,
-            settings);
+            settings,
+            controller,
+            reminders);
 }
 
 public sealed record WaterBodyStatus(
@@ -75,7 +80,11 @@ public sealed record WaterBodyStatus(
     /// <summary>The pool's preferred temperature unit: 0 = °F, 1 = °C.</summary>
     int TempUnits,
     /// <summary>The pool's settings, for the settings form.</summary>
-    PoolSettings? Settings);
+    PoolSettings? Settings,
+    /// <summary>What the pool's controller reports through Home Assistant, if it has one.</summary>
+    ControllerStatus? Controller,
+    /// <summary>Maintenance reminders and when each is due.</summary>
+    IReadOnlyList<Reminder> Reminders);
 
 /// <summary>
 /// The most recent test run LabCOM holds for a water body, mapped onto Pool Math's parameters.

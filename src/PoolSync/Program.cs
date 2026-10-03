@@ -1,6 +1,9 @@
 using System.Net.Http.Headers;
 using Microsoft.Extensions.Options;
+using PoolSync.Chemistry;
 using PoolSync.Configuration;
+using PoolSync.Controllers;
+using PoolSync.HomeAssistant;
 using PoolSync.Import;
 using PoolSync.LabCom;
 using PoolSync.PoolMath;
@@ -31,6 +34,12 @@ builder.Services.AddOptions<SyncOptions>()
 // Surface and other enums go over the wire by name, which is what the settings form sends back.
 builder.Services.ConfigureHttpJsonOptions(
     o => o.SerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
+
+builder.Services.Configure<List<HomeAssistantInstance>>(builder.Configuration.GetSection("HomeAssistant"));
+builder.Services.AddHttpClient(HomeAssistantClient.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(20));
+builder.Services.AddSingleton<HomeAssistantClient>();
+builder.Services.AddSingleton<HomeAssistantPublisher>();
+builder.Services.AddSingleton<ControllerMonitor>();
 
 builder.Services.AddSingleton<PoolDatabase>();
 builder.Services.AddScoped<PoolMathImporter>();
@@ -149,6 +158,134 @@ app.MapDelete("/tests/{id}", async (string id, PoolDatabase database, SyncRunner
     return Results.NoContent();
 });
 
+// --- Chemical additions, with a preview of what one would do to the water.
+
+app.MapGet("/chemicals", () => Results.Ok(new
+{
+    chemicals = Chemicals.All,
+    liquidUnits = Chemicals.LiquidUnits.Keys,
+    solidUnits = Chemicals.SolidUnits.Keys,
+}));
+
+app.MapGet("/additions", async (string waterBody, int? limit, PoolDatabase database, CancellationToken ct) =>
+    Results.Ok(await database.AdditionsAsync(waterBody, Math.Clamp(limit ?? 50, 1, 5000), ct)));
+
+app.MapPost("/additions", async (
+    AdditionRequest request, IOptions<List<WaterBodyOptions>> waterBodies, PoolDatabase database, SyncRunner runner,
+    CancellationToken ct) =>
+{
+    var body = FindWaterBody(waterBodies.Value, request.WaterBody);
+    var chemical = Chemicals.Find(request.Chemical);
+    if (body is null || chemical is null)
+    {
+        return Results.BadRequest(new { error = body is null ? "Unknown water body." : "Unknown chemical." });
+    }
+
+    if (request.Amount is not (> 0 and < 100000) || Chemicals.Normalise(chemical, request.Amount, request.Unit) is not { } normalised)
+    {
+        return Results.BadRequest(new { error = "Enter a positive amount in a unit that suits the product." });
+    }
+
+    var at = request.At ?? DateTimeOffset.UtcNow;
+    if (at > DateTimeOffset.UtcNow.AddMinutes(5))
+    {
+        return Results.BadRequest(new { error = "The time is in the future." });
+    }
+
+    var addition = new AdditionRecord
+    {
+        WaterBody = body.Name,
+        At = at,
+        Source = TestSource.Manual,
+        Chemical = chemical.Name,
+        Amount = request.Amount,
+        Unit = request.Unit,
+        Percent = chemical.DefaultPercent is null ? null : request.Percent ?? chemical.DefaultPercent,
+        Normalized = normalised,
+        Notes = string.IsNullOrWhiteSpace(request.Notes) ? null : request.Notes.Trim(),
+    };
+    await database.InsertAdditionAsync(addition, ct);
+    await runner.RunAsync(ct);
+    return Results.Ok(addition);
+});
+
+app.MapDelete("/additions/{id}", async (string id, PoolDatabase database, CancellationToken ct) =>
+    await database.DeleteManualEntryAsync("additions", id, ct)
+        ? Results.NoContent()
+        : Results.NotFound(new { error = "No hand-entered addition with that id." }));
+
+// What adding a product would do, from the current readings and the pool's volume. Nothing is saved.
+app.MapPost("/effects", async (
+    AdditionRequest request, IOptions<List<WaterBodyOptions>> waterBodies, PoolDatabase database,
+    SyncRunner runner, CancellationToken ct) =>
+{
+    var body = FindWaterBody(waterBodies.Value, request.WaterBody);
+    var chemical = Chemicals.Find(request.Chemical);
+    if (body is null || chemical is null || Chemicals.Normalise(chemical, request.Amount, request.Unit) is not { } normalised)
+    {
+        return Results.BadRequest(new { error = "Unknown water body, chemical or unit." });
+    }
+
+    var settings = await runner.SettingsAsync(body, pool: null, ct);
+    if (PoolProfile.From(settings).VolumeLitres is not { } litres)
+    {
+        return Results.BadRequest(new { error = "Set the pool's volume first." });
+    }
+
+    var water = WaterReadings.FromTests(await database.TestsAsync(body.Name, null, ct));
+    return Results.Ok(Chemicals.Effects(chemical, normalised, request.Percent, water, litres));
+});
+
+// --- Maintenance.
+
+app.MapGet("/maintenance", async (string waterBody, int? limit, PoolDatabase database, CancellationToken ct) =>
+    Results.Ok(await database.MaintenanceAsync(waterBody, Math.Clamp(limit ?? 50, 1, 5000), ct)));
+
+app.MapPost("/maintenance", async (
+    MaintenanceRequest request, IOptions<List<WaterBodyOptions>> waterBodies, PoolDatabase database, SyncRunner runner,
+    CancellationToken ct) =>
+{
+    var body = FindWaterBody(waterBodies.Value, request.WaterBody);
+    if (body is null)
+    {
+        return Results.BadRequest(new { error = "Unknown water body." });
+    }
+
+    var tasks = (request.Tasks ?? []).Where(MaintenanceTasks.Labels.ContainsKey).Distinct().ToList();
+    if (tasks.Count == 0 && request.FilterPsi is null && string.IsNullOrWhiteSpace(request.Notes))
+    {
+        return Results.BadRequest(new { error = "Tick a task, enter a filter pressure, or add a note." });
+    }
+
+    if (request.FilterPsi is < 0 or > 60)
+    {
+        return Results.BadRequest(new { error = "Filter pressure should be 0–60 psi." });
+    }
+
+    var data = tasks.ToDictionary(t => t, _ => (object)true);
+    if (request.FilterPsi is { } psi)
+    {
+        data["pressure"] = psi;
+    }
+
+    var entry = new MaintenanceRecord
+    {
+        WaterBody = body.Name,
+        At = request.At ?? DateTimeOffset.UtcNow,
+        Source = TestSource.Manual,
+        Data = System.Text.Json.JsonSerializer.Serialize(data),
+        Notes = string.IsNullOrWhiteSpace(request.Notes) ? null : request.Notes.Trim(),
+    };
+    await database.InsertMaintenanceAsync(entry, ct);
+    await runner.RunAsync(ct);
+    return Results.Ok(entry);
+});
+
+app.MapDelete("/maintenance/{id}", async (string id, PoolDatabase database, CancellationToken ct) =>
+    await database.DeleteManualEntryAsync("maintenance", id, ct)
+        ? Results.NoContent()
+        : Results.NotFound(new { error = "No hand-entered maintenance entry with that id." }));
+
 // Copies Pool Math's whole history into the local database. Repeatable: already-imported entries
 // are skipped. Run it before cancelling the subscription.
 app.MapPost("/import/poolmath", async (
@@ -230,6 +367,9 @@ static async Task RunDiscoveryAsync(WebApplication app, string[] args)
     }
 }
 
+static WaterBodyOptions? FindWaterBody(IEnumerable<WaterBodyOptions> bodies, string? name) =>
+    bodies.FirstOrDefault(w => w.Enabled && string.Equals(w.Name, name, StringComparison.OrdinalIgnoreCase));
+
 static string? SettingsProblem(PoolSettings s)
 {
     if (s.Volume is <= 0 or > 10_000_000)
@@ -256,5 +396,23 @@ static string? SettingsProblem(PoolSettings s)
         return "Borate min, target and max must be in order, within 0–100.";
     }
 
+    if (s.ReminderDays.Values.Any(d => d is < 1 or > 3650))
+    {
+        return "Reminder intervals must be 1–3650 days.";
+    }
+
+    if (s.AcidTankLowOz < 0 || s.FilterPsiRise <= 0 || s.PhDriftLimit <= 0 || s.SaltDriftLimit <= 0 || s.TempDriftLimitC <= 0)
+    {
+        return "Thresholds must be positive.";
+    }
+
     return s.FcTarget is < 0 or > 40 ? "FC target must be within 0–40." : null;
 }
+
+/// <summary>Body of POST /additions and POST /effects.</summary>
+internal sealed record AdditionRequest(
+    string WaterBody, string Chemical, double Amount, string Unit, double? Percent, DateTimeOffset? At, string? Notes);
+
+/// <summary>Body of POST /maintenance. Tasks are the keys in MaintenanceTasks.</summary>
+internal sealed record MaintenanceRequest(
+    string WaterBody, List<string>? Tasks, double? FilterPsi, DateTimeOffset? At, string? Notes);
