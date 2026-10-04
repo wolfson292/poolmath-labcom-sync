@@ -89,6 +89,10 @@ if (args.Contains("list-accounts") || args.Contains("list-pools") || args.Contai
     return;
 }
 
+// Name imported Pool Math additions whose codes have since been identified.
+await app.Services.GetRequiredService<PoolDatabase>().NameImportedAdditionsAsync(
+    PoolMathImporter.ChemicalNames, PoolMathImporter.Units, CancellationToken.None);
+
 // wwwroot/index.html is the root page: status for each water body plus a manual sync button.
 app.UseDefaultFiles();
 app.UseStaticFiles();

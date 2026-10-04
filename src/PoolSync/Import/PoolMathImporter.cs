@@ -32,11 +32,25 @@ public sealed class PoolMathImporter(
     /// Pool Math's unit codes, worked out from entries whose normalised amount pins the unit down
     /// (5 gal = 18,927 mL). Codes not listed here are kept as codes.
     /// </summary>
-    private static readonly Dictionary<int, string> Units = new()
+    public static readonly IReadOnlyDictionary<int, string> Units = new Dictionary<int, string>
     {
         [4] = "fl oz",
         [5] = "gal",
+        [6] = "lb",
         [7] = "oz",
+    };
+
+    /// <summary>
+    /// Pool Math's chemical codes, as identified from this account's history: code 0 is the only one
+    /// logged with a strength, and the rest were named by the pool's owner. Unknown codes stay codes.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<int, string> ChemicalNames = new Dictionary<int, string>
+    {
+        [0] = PoolSync.Chemistry.Chemicals.LiquidChlorine,
+        [14] = PoolSync.Chemistry.Chemicals.MuriaticAcid,
+        [15] = PoolSync.Chemistry.Chemicals.MuriaticAcid,
+        [24] = PoolSync.Chemistry.Chemicals.Stabilizer,
+        [26] = PoolSync.Chemistry.Chemicals.Salt,
     };
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
@@ -167,6 +181,7 @@ public sealed class PoolMathImporter(
         WaterBody = waterBody,
         At = at,
         Source = TestSource.PoolMath,
+        Chemical = entry.Chemical is { } code ? ChemicalNames.GetValueOrDefault(code) : null,
         ChemicalCode = entry.Chemical,
         Amount = entry.Amount,
         Unit = entry.Unit is { } u ? Units.GetValueOrDefault(u) : null,

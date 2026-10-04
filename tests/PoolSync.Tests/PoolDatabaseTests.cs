@@ -110,4 +110,20 @@ public sealed class PoolDatabaseTests : IDisposable
         Assert.Equal(1, counts["tests:poolmath"]);
         Assert.Equal(1, counts["additions"]);
     }
+
+    [Fact]
+    public async Task Stored_additions_are_named_once_their_code_is_known()
+    {
+        await _database.InsertAdditionAsync(new AdditionRecord
+        {
+            WaterBody = "Allaire", At = DateTimeOffset.UtcNow, Source = TestSource.PoolMath,
+            ChemicalCode = 26, UnitCode = 6, Amount = 40, ExternalId = "poolmath:x",
+        }, default);
+
+        await _database.NameImportedAdditionsAsync(
+            new Dictionary<int, string> { [26] = "Salt" }, new Dictionary<int, string> { [6] = "lb" }, default);
+
+        var addition = Assert.Single(await _database.AdditionsAsync("Allaire", null, default));
+        Assert.Equal(("Salt", "lb"), (addition.Chemical, addition.Unit));
+    }
 }

@@ -599,6 +599,37 @@ public sealed class PoolDatabase
         }
     }
 
+    /// <summary>
+    /// Names imported additions that only carry Pool Math's codes, once a code's meaning is known.
+    /// Only fills empty names and units, so it's safe to run every time.
+    /// </summary>
+    public async Task<int> NameImportedAdditionsAsync(
+        IReadOnlyDictionary<int, string> chemicals, IReadOnlyDictionary<int, string> units, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        var changed = 0;
+
+        foreach (var (code, name) in chemicals)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE additions SET chemical = $name WHERE chemical IS NULL AND chemical_code = $code";
+            Add(command, "$name", name);
+            Add(command, "$code", code);
+            changed += await command.ExecuteNonQueryAsync(ct);
+        }
+
+        foreach (var (code, unit) in units)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE additions SET unit = $unit WHERE unit IS NULL AND unit_code = $code";
+            Add(command, "$unit", unit);
+            Add(command, "$code", code);
+            changed += await command.ExecuteNonQueryAsync(ct);
+        }
+
+        return changed;
+    }
+
     /// <summary>Row counts per table and source, for the status page footer and import results.</summary>
     public async Task<IReadOnlyDictionary<string, long>> CountsAsync(CancellationToken ct)
     {

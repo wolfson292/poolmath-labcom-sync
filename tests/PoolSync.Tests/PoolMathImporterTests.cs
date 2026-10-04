@@ -58,20 +58,24 @@ public class PoolMathImporterTests
         var addition = PoolMathImporter.ToAddition(entry, "SPA", At, "poolmath:c");
 
         Assert.Equal(0, addition.ChemicalCode);
+        Assert.Equal("Liquid chlorine", addition.Chemical);
         Assert.Equal("gal", addition.Unit);
         Assert.Equal(10.5, addition.Percent);
         Assert.Equal(18927.05, addition.Normalized);
     }
 
     [Fact]
-    public void An_unknown_unit_code_is_kept_as_a_code()
+    public void Identified_codes_get_names_and_unknown_ones_stay_codes()
     {
-        var entry = Parse("""{"type":"chemlog","id":"c","chemical":26,"amount":2.0,"unit":6}""");
+        var salt = PoolMathImporter.ToAddition(
+            Parse("""{"type":"chemlog","id":"c","chemical":26,"amount":2.0,"unit":6}"""), "SPA", At, "poolmath:c");
+        var unknown = PoolMathImporter.ToAddition(
+            Parse("""{"type":"chemlog","id":"d","chemical":9,"amount":192,"unit":3}"""), "Allaire", At, "poolmath:d");
 
-        var addition = PoolMathImporter.ToAddition(entry, "SPA", At, "poolmath:c");
-
-        Assert.Null(addition.Unit);
-        Assert.Equal(6, addition.UnitCode);
+        Assert.Equal(("Salt", "lb"), (salt.Chemical, salt.Unit));
+        Assert.Null(unknown.Chemical);
+        Assert.Equal(9, unknown.ChemicalCode);
+        Assert.Null(unknown.Unit);
     }
 
     [Fact]
