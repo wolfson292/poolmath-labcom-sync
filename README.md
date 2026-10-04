@@ -209,6 +209,25 @@ doser's counters. Every sync it:
   its low mark, filter pressure 8 psi above clean at the same pump speed, and a pump drawing 25% more
   or less power than usual for its speed.
 
+**FC between tests.** Where a controller has an ORP probe, each FC test is paired with the ORP at
+that moment, and ORP is fitted against log(FC / CYA) for that pool over the last 90 days. Once
+there are at least three such tests spread across different FC levels and the fit holds (R² ≥ 0.5),
+the card shows FC estimated from live ORP, its trend over the last 6 hours, and when it will reach
+the minimum, with a warning if that's within 6 hours or already past. Until then it says how many
+more tests it needs.
+
+**Rain dilution.** Each pool has a location (filled in from its controller's Home Assistant) and a
+surface area (from the controller, or estimated from volume; a spa is assumed covered). Daily rain
+and evaporation come from Open-Meteo, which needs no key and goes back decades. Following the level
+from each CYA, CH, salt and borate test — rain up, evaporation down, overflow above normal carrying
+chemicals out, a 2 in drop assumed topped up with fresh water — gives how much has overflowed and
+what the reading has likely been diluted to. It's shown beside the reading as an estimate; tests
+stay the record and drive the dosing.
+
+**Trends.** Each card charts every test reading over 30 days, 90 days, a year, or all of it, with
+the ideal range shaded and low/average/high in the title, plus the controller's sensors as hourly
+means on their own charts.
+
 **Alerts and entities.** Warnings and overdue reminders go to Home Assistant instance 0's notify
 service (`notify.all_devices`), once, then daily while they last. Each water body's CSI (with the
 recommendations as attributes) and current readings are published as `sensor.poolsync_<pool>_*`
@@ -230,6 +249,7 @@ entities, refreshed every sync.
 | `POST /effects` | Previews an addition's effect on the current readings; saves nothing. |
 | `GET/POST /maintenance`, `DELETE /maintenance/{id}` | Maintenance entries. |
 | `GET /chemicals` | The products and units the forms offer. |
+| `GET /trends?waterBody=Pool&days=90` | Tests in the range, and controller samples as hourly means. |
 | `POST /sync` | Runs a sync immediately, writing sessions without waiting out `SessionSettleTime`. 200 with the number of logs written, 409 if a run is already in progress, 502 if the run failed. |
 
 The readings shown are the newest LabCOM holds, which is not always what has been synced — a water

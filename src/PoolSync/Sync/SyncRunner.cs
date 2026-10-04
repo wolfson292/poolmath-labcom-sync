@@ -61,6 +61,7 @@ public sealed class SyncRunner(
     PoolDatabase database,
     ControllerMonitor controllers,
     HomeAssistantPublisher homeAssistant,
+    Weather.RainClient rainClient,
     SyncStatus status,
     ILogger<SyncRunner> logger)
 {
@@ -413,9 +414,13 @@ public sealed class SyncRunner(
         RunContext run,
         CancellationToken ct)
     {
-        var settings = await SettingsAsync(waterBody, pool, ct);
+        var settings = await controllers.SeedSettingsAsync(waterBody, await SettingsAsync(waterBody, pool, ct), run.States, ct);
         var tests = await database.TestsAsync(waterBody.Name, limit: null, ct);
-        var balance = _balance.Calculate(WaterReadings.FromTests(tests, pending), PoolProfile.From(settings));
+        var profile = PoolProfile.From(settings);
+        var balance = _balance.Calculate(WaterReadings.FromTests(tests, pending), profile);
+        var dilution = await DilutionAsync(balance, settings, profile, ct);
+        var fcTarget = balance.Targets.FirstOrDefault(t => t.Key == PoolMathFields.FreeChlorine);
+        var cya = balance.Water.TryGetValue(PoolMathFields.CyanuricAcid, out var cyaReading) ? cyaReading.Value : (double?)null;
         var maintenance = await database.MaintenanceAsync(waterBody.Name, limit: 500, ct);
         var reminders = EquipmentHealth.Reminders(maintenance, settings, run.Now);
 
@@ -424,7 +429,8 @@ public sealed class SyncRunner(
         ControllerStatus? controller = null;
         try
         {
-            controller = await controllers.CheckAsync(waterBody, settings, tests, maintenance, run.States, run.Now, ct);
+            controller = await controllers.CheckAsync(
+                waterBody, settings, tests, maintenance, run.States, run.Now, ct, cya, fcTarget?.Min);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -443,7 +449,20 @@ public sealed class SyncRunner(
 
         status.RecordWaterBody(
             waterBody.Name, written, lastSyncedReading, latest, shareUrl, balance, settings.TempUnits, settings,
-            controller, reminders);
+            controller, reminders, dilution);
+    }
+
+    /// <summary>Rain since CYA, CH, salt and borate were tested, and what it has likely diluted them to.</summary>
+    private async Task<DilutionResult?> DilutionAsync(
+        WaterBalance balance, PoolSettings settings, PoolProfile profile, CancellationToken ct)
+    {
+        if (settings.Latitude is not { } lat || settings.Longitude is not { } lon || Dilution.Since(balance.Water) is not { } since)
+        {
+            return null;
+        }
+
+        var rain = await rainClient.DailyAsync(lat, lon, since, ct);
+        return rain is null ? null : Dilution.Estimate(balance.Water, rain, settings, profile.VolumeLitres);
     }
 
     /// <summary>"Sep 1", or "Aug 25, 2019" when it isn't this year.</summary>

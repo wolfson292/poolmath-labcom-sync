@@ -36,6 +36,17 @@ public sealed record PoolSettings
     /// <summary>0 = Fahrenheit, 1 = Celsius: how temperatures are shown and entered by default.</summary>
     public int TempUnits { get; init; }
 
+    /// <summary>Where the pool is, for rainfall. Seeded from its controller's Home Assistant location.</summary>
+    public double? Latitude { get; init; }
+
+    public double? Longitude { get; init; }
+
+    /// <summary>
+    /// Water surface, in ft² (or m² when the volume is in litres), for how much rain the pool takes on.
+    /// Empty: estimated from the volume, or for a spa, assumed covered.
+    /// </summary>
+    public double? SurfaceArea { get; init; }
+
     /// <summary>
     /// How often each maintenance task is due, in days; null turns that reminder off. Keys are the
     /// task names in <see cref="MaintenanceTasks"/>.

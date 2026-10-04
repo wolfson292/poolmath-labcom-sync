@@ -40,6 +40,8 @@ builder.Services.AddHttpClient(HomeAssistantClient.HttpClientName, client => cli
 builder.Services.AddSingleton<HomeAssistantClient>();
 builder.Services.AddSingleton<HomeAssistantPublisher>();
 builder.Services.AddSingleton<ControllerMonitor>();
+builder.Services.AddHttpClient(PoolSync.Weather.RainClient.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(20));
+builder.Services.AddSingleton<PoolSync.Weather.RainClient>();
 
 builder.Services.AddSingleton<PoolDatabase>();
 builder.Services.AddScoped<PoolMathImporter>();
@@ -156,6 +158,38 @@ app.MapDelete("/tests/{id}", async (string id, PoolDatabase database, SyncRunner
 
     await runner.RunAsync(ct);
     return Results.NoContent();
+});
+
+// Trends for the charts: the tests in a time range, and the controller's samples as hourly means.
+// Kept as two separate series sets: tests are the record, samples only show what the sensors did.
+app.MapGet("/trends", async (string waterBody, int? days, PoolDatabase database, CancellationToken ct) =>
+{
+    var since = DateTimeOffset.UtcNow.AddDays(-Math.Clamp(days ?? 90, 1, 36500));
+    var tests = (await database.TestsAsync(waterBody, null, ct))
+        .Where(t => t.TakenAt >= since)
+        .OrderBy(t => t.TakenAt)
+        .Select(t => new
+        {
+            t.TakenAt,
+            t.Source,
+            t.Fc, t.Cc, t.Ph, t.Ta, t.Cya, t.Ch, t.Salt, t.Bor,
+            waterTempC = WaterReadings.Temperature(t.WaterTemp, t.WaterTempUnits).Celsius,
+        });
+
+    var samples = new Dictionary<string, object>(StringComparer.Ordinal);
+    foreach (var role in new[] { SensorRole.Ph, SensorRole.Orp, SensorRole.WaterTemp, SensorRole.Salt, SensorRole.FilterPsi, SensorRole.PumpWatts })
+    {
+        var hourly = (await database.SamplesAsync(waterBody, role, since, ct))
+            .GroupBy(x => new DateTimeOffset(x.At.Year, x.At.Month, x.At.Day, x.At.Hour, 0, 0, x.At.Offset))
+            .Select(g => new { at = g.Key, value = Math.Round(g.Average(x => x.Value), 3) })
+            .ToList();
+        if (hourly.Count > 0)
+        {
+            samples[role] = hourly;
+        }
+    }
+
+    return Results.Ok(new { since, tests, samples });
 });
 
 // --- Chemical additions, with a preview of what one would do to the water.
@@ -394,6 +428,16 @@ static string? SettingsProblem(PoolSettings s)
     if (!Ordered(s.BorMin, s.BorTarget, s.BorMax) || s.BorTarget is < 0 or > 100)
     {
         return "Borate min, target and max must be in order, within 0–100.";
+    }
+
+    if (s.Latitude is < -90 or > 90 || s.Longitude is < -180 or > 180 || (s.Latitude is null) != (s.Longitude is null))
+    {
+        return "Give both latitude and longitude, within range.";
+    }
+
+    if (s.SurfaceArea is <= 0 or > 1_000_000)
+    {
+        return "Surface area must be a positive number.";
     }
 
     if (s.ReminderDays.Values.Any(d => d is < 1 or > 3650))

@@ -20,7 +20,8 @@ public sealed record ControllerStatus(
     IReadOnlyList<ControllerFault> Faults,
     IReadOnlyList<ComparisonView> Comparisons,
     IReadOnlyList<HealthIssue> Issues,
-    double? FilterCleanPsi);
+    double? FilterCleanPsi,
+    FcPrediction? Fc = null);
 
 /// <summary>
 /// Reads each pool's controller through Home Assistant on every sync. Samples are stored on their
@@ -65,6 +66,55 @@ public sealed class ControllerMonitor(
     public async Task PruneAsync(DateTimeOffset now, CancellationToken ct) =>
         await database.PruneSamplesAsync(now - SampleRetention, ct);
 
+    /// <summary>
+    /// Fills in a pool's location (for rainfall) from its controller's Home Assistant, and its
+    /// surface area from the controller if it reports one. Only fields still empty are touched.
+    /// </summary>
+    public async Task<PoolSettings> SeedSettingsAsync(
+        WaterBodyOptions waterBody, PoolSettings settings, StatesCache cache, CancellationToken ct)
+    {
+        if (waterBody.Controller is not { Device: { Length: > 0 } device } controller
+            || !homeAssistant.IsConfigured(controller.HomeAssistant)
+            || (settings.Latitude is not null && settings.SurfaceArea is not null))
+        {
+            return settings;
+        }
+
+        var seeded = settings;
+        try
+        {
+            if (settings.Latitude is null && await homeAssistant.LocationAsync(controller.HomeAssistant, ct) is { } location)
+            {
+                seeded = seeded with { Latitude = Math.Round(location.Latitude, 4), Longitude = Math.Round(location.Longitude, 4) };
+            }
+
+            if (settings.SurfaceArea is null && settings.VolumeUnit == 0)
+            {
+                var states = await cache.GetAsync(controller.HomeAssistant, ct);
+                var area = states.FirstOrDefault(s => s.EntityId.StartsWith("number.", StringComparison.Ordinal)
+                    && s.EntityId.Contains(device, StringComparison.OrdinalIgnoreCase)
+                    && s.EntityId.EndsWith("_surface_area", StringComparison.Ordinal))?.Number;
+                if (area is > 0)
+                {
+                    seeded = seeded with { SurfaceArea = area };
+                }
+            }
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+        {
+            logger.LogDebug("Could not seed {Name}'s location: {Message}", waterBody.Name, ex.Message);
+            return settings;
+        }
+
+        if (seeded != settings)
+        {
+            await database.SaveSettingsAsync(waterBody.Name, seeded, ct);
+            logger.LogInformation("{Name}: filled in location/surface area from Home Assistant.", waterBody.Name);
+        }
+
+        return seeded;
+    }
+
     public async Task<ControllerStatus?> CheckAsync(
         WaterBodyOptions waterBody,
         PoolSettings settings,
@@ -72,7 +122,9 @@ public sealed class ControllerMonitor(
         IReadOnlyList<MaintenanceRecord> maintenance,
         StatesCache cache,
         DateTimeOffset now,
-        CancellationToken ct)
+        CancellationToken ct,
+        double? cya = null,
+        double? fcMinimum = null)
     {
         if (waterBody.Controller is not { Device: { Length: > 0 } device } controller)
         {
@@ -153,7 +205,39 @@ public sealed class ControllerMonitor(
             }
         }
 
-        return new ControllerStatus(device, instance, true, null, readings, faults, comparisons, issues, cleanPsi);
+        FcPrediction? fc = null;
+        if (byRole.ContainsKey(SensorRole.Orp) && fcMinimum is { } minimum)
+        {
+            fc = await PredictFcAsync(waterBody, cya, minimum, now, ct);
+            if (fc.Estimate is { } estimate && estimate < minimum)
+            {
+                issues.Add(new HealthIssue($"{waterBody.Name}:fc-low", HealthIssue.Warning,
+                    $"{waterBody.Name}: FC is about {estimate:0.#} going by ORP, below the {minimum:0.#} minimum. Add chlorine."));
+            }
+            else if (fc.HoursToMinimum is < 6 and var hours)
+            {
+                issues.Add(new HealthIssue($"{waterBody.Name}:fc-falling", HealthIssue.Warning,
+                    $"{waterBody.Name}: FC is about {fc.Estimate:0.#} going by ORP and falling; it reaches the " +
+                    $"{minimum:0.#} minimum in about {hours:0} h."));
+            }
+        }
+
+        return new ControllerStatus(device, instance, true, null, readings, faults, comparisons, issues, cleanPsi, fc);
+    }
+
+    /// <summary>Calibrates ORP against the last 90 days of FC tests, then reads the last 6 hours of ORP through it.</summary>
+    private async Task<FcPrediction> PredictFcAsync(
+        WaterBodyOptions waterBody, double? cya, double minimum, DateTimeOffset now, CancellationToken ct)
+    {
+        var points = (await database.ComparisonsAsync(waterBody.Name, 500, ct))
+            .Where(c => c.Role == SensorRole.Orp && c.At >= now.AddDays(-90))
+            .Select(c => (Ratio: c.TestValue, Orp: c.SensorValue))
+            .ToList();
+        var calibration = FcFromOrp.Fit(points);
+        var recent = (await database.SamplesAsync(waterBody.Name, SensorRole.Orp, now.AddHours(-6), ct))
+            .Select(s => (s.At, s.Value))
+            .ToList();
+        return FcFromOrp.Predict(calibration, points.Count, cya, minimum, recent);
     }
 
     /// <summary>
@@ -226,9 +310,10 @@ public sealed class ControllerMonitor(
 
         foreach (var test in tests.Where(t => t.TakenAt >= now - ComparisonLookback && t.TakenAt <= now.AddMinutes(-10)))
         {
-            foreach (var role in new[] { SensorRole.Ph, SensorRole.Salt, SensorRole.WaterTemp })
+            foreach (var role in new[] { SensorRole.Ph, SensorRole.Salt, SensorRole.WaterTemp, SensorRole.Orp })
             {
-                if (!byRole.TryGetValue(role, out var sensor) || TestValue(test, role) is not { } testValue
+                var testValue = role == SensorRole.Orp ? FcOverCya(test, tests) : TestValue(test, role);
+                if (!byRole.TryGetValue(role, out var sensor) || testValue is null
                     || done.Contains(test.Id + "|" + role))
                 {
                     continue;
@@ -246,7 +331,7 @@ public sealed class ControllerMonitor(
                 }
 
                 await database.InsertComparisonAsync(new SensorComparison(
-                    test.Id, waterBody.Name, role, test.TakenAt, testValue, sensorValue.Value, test.Source), ct);
+                    test.Id, waterBody.Name, role, test.TakenAt, testValue.Value, sensorValue.Value, test.Source), ct);
             }
         }
     }
@@ -286,7 +371,9 @@ public sealed class ControllerMonitor(
         WaterBodyOptions waterBody, PoolSettings settings, CancellationToken ct)
     {
         var all = await database.ComparisonsAsync(waterBody.Name, 200, ct);
+        // ORP pairs calibrate the FC estimate; there's no test value to show a difference against.
         return all
+            .Where(c => c.Role != SensorRole.Orp)
             .GroupBy(c => c.Role)
             .Select(g => g.First())
             .Select(c =>
@@ -307,6 +394,21 @@ public sealed class ControllerMonitor(
             .Where(s => b.ContainsKey(s.At))
             .Select(s => (s.At, s.Value, b[s.At]))
             .ToList();
+    }
+
+    /// <summary>A test's FC over the CYA in force at the time (the newest CYA test up to then).</summary>
+    public static double? FcOverCya(TestRecord test, IReadOnlyList<TestRecord> tests)
+    {
+        if (test.Fc is not { } fc)
+        {
+            return null;
+        }
+
+        var cya = test.Cya ?? tests
+            .Where(t => t.Cya is > 0 and <= 300 && t.TakenAt <= test.TakenAt)
+            .OrderByDescending(t => t.TakenAt)
+            .FirstOrDefault()?.Cya;
+        return cya is > 0 && fc is >= 0 and <= 60 ? fc / cya : null;
     }
 
     public static double? TestValue(TestRecord test, string role) => role switch

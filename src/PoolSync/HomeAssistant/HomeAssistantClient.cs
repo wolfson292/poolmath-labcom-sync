@@ -114,6 +114,17 @@ public sealed class HomeAssistantClient(
         return points;
     }
 
+    /// <summary>The instance's configured home location, for rainfall at the pool.</summary>
+    public async Task<(double Latitude, double Longitude)?> LocationAsync(int instance, CancellationToken ct)
+    {
+        using var http = Client(instance);
+        var config = await http.GetFromJsonAsync<JsonElement>("api/config", Json, ct);
+        return config.TryGetProperty("latitude", out var lat) && config.TryGetProperty("longitude", out var lon)
+               && lat.TryGetDouble(out var la) && lon.TryGetDouble(out var lo)
+            ? (la, lo)
+            : null;
+    }
+
     /// <summary>Sends a notification through instance 0's configured notify service.</summary>
     public async Task NotifyAsync(string title, string message, CancellationToken ct)
     {

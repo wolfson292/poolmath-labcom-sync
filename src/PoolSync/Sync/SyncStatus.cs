@@ -52,7 +52,8 @@ public sealed class SyncStatus
         int tempUnits,
         PoolSettings? settings,
         ControllerStatus? controller,
-        IReadOnlyList<Reminder> reminders) =>
+        IReadOnlyList<Reminder> reminders,
+        DilutionResult? dilution) =>
         _waterBodies[name] = new WaterBodyStatus(
             name,
             sessionsWritten,
@@ -64,7 +65,8 @@ public sealed class SyncStatus
             tempUnits,
             settings,
             controller,
-            reminders);
+            reminders,
+            dilution);
 }
 
 public sealed record WaterBodyStatus(
@@ -84,7 +86,9 @@ public sealed record WaterBodyStatus(
     /// <summary>What the pool's controller reports through Home Assistant, if it has one.</summary>
     ControllerStatus? Controller,
     /// <summary>Maintenance reminders and when each is due.</summary>
-    IReadOnlyList<Reminder> Reminders);
+    IReadOnlyList<Reminder> Reminders,
+    /// <summary>Rain since the slow-changing readings were tested, and the diluted estimates.</summary>
+    DilutionResult? Dilution);
 
 /// <summary>
 /// The most recent test run LabCOM holds for a water body, mapped onto Pool Math's parameters.

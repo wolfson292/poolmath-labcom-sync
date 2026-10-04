@@ -16,6 +16,7 @@
     --ok: #157347;
     --warn: #a15c07;
     --bad: #b02a37;
+    --series: #255aab;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -28,6 +29,7 @@
       --ok: #4ade80;
       --warn: #fbbf24;
       --bad: #f87171;
+      --series: #5b95ec;
     }
   }
   * { box-sizing: border-box; }
@@ -107,6 +109,23 @@
   .preview { grid-column: 1 / -1; font-size: .85rem; font-variant-numeric: tabular-nums; min-height: 1.2em; }
   .due { font-size: .85rem; display: grid; gap: .2rem; margin: 0 0 .6rem; }
   .due .over { color: var(--warn); font-weight: 600; }
+  .ranges { display: flex; gap: .35rem; margin-bottom: .6rem; }
+  .ranges button { background: none; color: var(--muted); border: 1px solid var(--line); padding: .15rem .6rem;
+    font-size: .78rem; font-weight: 500; }
+  .ranges button[aria-pressed="true"] { color: var(--ink); border-color: var(--ink); }
+  .chart { position: relative; margin-bottom: .9rem; }
+  .chart .ctitle { font-size: .82rem; display: flex; justify-content: space-between; gap: .5rem; }
+  .chart .ctitle span:last-child { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .chart .axis { fill: var(--muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+  .chart .grid { stroke: var(--line); stroke-width: 1; }
+  .chart .band { fill: var(--muted); opacity: .12; }
+  .chart .line { fill: none; stroke: var(--series); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .chart .dot { fill: var(--series); stroke: var(--card); stroke-width: 2; }
+  .chart .cross { stroke: var(--muted); stroke-width: 1; }
+  .chart .tip { position: absolute; pointer-events: none; background: var(--card); border: 1px solid var(--line);
+    border-radius: .35rem; padding: .2rem .45rem; font-size: .75rem; white-space: nowrap; display: none;
+    box-shadow: 0 2px 6px rgb(0 0 0 / .12); }
   form.manual { display: grid; grid-template-columns: auto 1fr auto; gap: .4rem .5rem; align-items: center; }
   form.manual .wide { grid-column: 2 / -1; }
   form.manual label.check { grid-column: 1 / -1; display: flex; gap: .5rem; align-items: center; color: var(--ink); }
@@ -209,6 +228,13 @@
         unit ? round(reading.value) + " " + unit : String(round(reading.value)));
       const from = provenance(reading, body.latest);
       if (from) dd.appendChild(el("small", "", from));
+      const diluted = body.dilution && body.dilution.readings.find((d) => d.key === key && d.percent >= 1);
+      if (diluted) {
+        const note = el("small", "", "≈ " + round(diluted.estimate) + " after rain since (−" + diluted.percent + "%)");
+        note.title = diluted.rainInches + " in of rain since the test, of which about " + diluted.overflowInches +
+          " in overflowed after evaporation. An estimate: retest to confirm.";
+        dd.appendChild(note);
+      }
       dl.append(el("dt", "", label), dd);
     }
 
@@ -462,6 +488,9 @@
       saltMin: num("saltMin", "100"), saltTarget: num("saltTarget", "100"), saltMax: num("saltMax", "100"),
       borMin: num("borMin", "1"), borTarget: num("borTarget", "1"), borMax: num("borMax", "1"),
       fcTarget: num("fcTarget", "0.5"),
+      latitude: num("latitude", "0.0001"),
+      longitude: num("longitude", "0.0001"),
+      surfaceArea: num("surfaceArea", "10"),
       acidTankLowOz: num("acidTankLowOz", "8"),
       filterPsiRise: num("filterPsiRise", "1"),
       phDriftLimit: num("phDriftLimit", "0.05"),
@@ -489,7 +518,12 @@
     for (const [label, node] of Object.values(reminderInputs)) {
       form.append(el("label", "", label + " every"), node, el("span", "unit", "days"));
     }
+    fields.longitude.min = "-180";
+    fields.latitude.min = "-90";
     form.append(
+      el("label", "", "Latitude"), fields.latitude, el("span", "unit", "°"),
+      el("label", "", "Longitude"), fields.longitude, el("span", "unit", "°"),
+      el("label", "", "Surface area"), fields.surfaceArea, el("span", "unit", (s.volumeUnit ?? 0) === 0 ? "ft²" : "m²"),
       el("label", "", "Acid tank low"), fields.acidTankLowOz, el("span", "unit", "fl oz"),
       el("label", "", "Filter rise"), fields.filterPsiRise, el("span", "unit", "psi"),
       el("label", "", "pH probe drift"), fields.phDriftLimit, el("span", "unit", "pH"),
@@ -498,7 +532,8 @@
     const save = el("button", "", "Save settings");
     save.type = "submit";
     const fmsg = el("div", "fmsg", "Leave a target empty to skip that check. FC target empty = follow CYA. " +
-      "Leave a reminder empty to turn it off.");
+      "Leave a reminder empty to turn it off. Location is for rainfall; surface area empty = estimated " +
+      "from volume (a spa counts as covered).");
     form.append(save, fmsg);
 
     form.addEventListener("submit", async (event) => {
@@ -598,6 +633,29 @@
       dl.append(el("dt", "", ROLE_LABELS[r.role] || r.role), dd);
     }
     wrap.appendChild(dl);
+
+    if (c.fc) {
+      wrap.appendChild(el("h3", "", "FC between tests"));
+      const f = c.fc;
+      if (f.estimate !== null && f.estimate !== undefined) {
+        const dl2 = el("dl", "ctrl");
+        const dd = el("dd", f.estimate < f.minimum ? "drift" : "", "≈ " + f.estimate + " ppm");
+        dd.appendChild(el("small", "", "from ORP · fit on " + f.calibrationPoints + " tests (R² " + f.r2 + ")"));
+        dl2.append(el("dt", "", "Estimated FC"), dd);
+        if (f.perHour !== null && f.perHour !== undefined) {
+          const trend = el("dd", "", (f.perHour >= 0 ? "+" : "−") + Math.abs(f.perHour).toFixed(2) + " ppm/h");
+          if (f.hoursToMinimum !== null && f.hoursToMinimum !== undefined) {
+            const when = new Date(Date.now() + f.hoursToMinimum * 3600e3);
+            trend.appendChild(el("small", "", "reaches " + f.minimum + " around " +
+              when.toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })));
+          }
+          dl2.append(el("dt", "", "Trend (6 h)"), trend);
+        }
+        wrap.appendChild(dl2);
+      } else {
+        wrap.appendChild(el("p", "none", f.note || "Not enough data yet."));
+      }
+    }
 
     if (c.comparisons && c.comparisons.length) {
       wrap.appendChild(el("h3", "", "Sensors vs tests"));
@@ -796,6 +854,173 @@
     return wrap;
   }
 
+  const SVG = "http://www.w3.org/2000/svg";
+  function svg(tag, attrs) {
+    const node = document.createElementNS(SVG, tag);
+    for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
+    return node;
+  }
+
+  // Round tick values: 1, 2 or 5 times a power of ten.
+  function ticks(min, max, count) {
+    const span = max - min || Math.abs(max) || 1;
+    const raw = span / count;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const step = [1, 2, 5, 10].map((m) => m * mag).find((x) => x >= raw);
+    const out = [];
+    for (let v = Math.ceil(min / step) * step; v <= max + step * 1e-9; v += step) out.push(+v.toFixed(10));
+    return out;
+  }
+
+  // One series over time. Single series: the title names it, so no legend. Points are tests
+  // (markers) or hourly sensor means (line only). The ideal range, when known, is a quiet band.
+  function lineChart({ title, points, band, format, markers, from, to }) {
+    const wrap = el("div", "chart");
+    const values = points.map((p) => p.v);
+    const lo = Math.min(...values), hi = Math.max(...values);
+    const avg = values.reduce((a, b) => a + b, 0) / values.length;
+    const head = el("div", "ctitle");
+    head.append(el("span", "", title),
+      el("span", "", "low " + format(lo) + " · avg " + format(avg) + " · high " + format(hi) +
+        " · " + points.length + (markers ? " tests" : " h")));
+    wrap.appendChild(head);
+
+    const W = 340, H = 104, L = 34, R = 8, T = 8, B = 18;
+    let yMin = lo, yMax = hi;
+    if (band) { yMin = Math.min(yMin, band.min); yMax = Math.max(yMax, band.max); }
+    const pad = (yMax - yMin) * 0.12 || Math.abs(yMax) * 0.05 || 1;
+    yMin -= pad; yMax += pad;
+    const x = (t) => L + (W - L - R) * ((t - from) / (to - from || 1));
+    const y = (v) => T + (H - T - B) * (1 - (v - yMin) / (yMax - yMin));
+
+    const chart = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": title + " over time" });
+    for (const v of ticks(yMin, yMax, 3)) {
+      if (v < yMin || v > yMax) continue;
+      chart.append(svg("line", { class: "grid", x1: L, x2: W - R, y1: y(v), y2: y(v) }));
+      const label = svg("text", { class: "axis", x: L - 4, y: y(v) + 3, "text-anchor": "end" });
+      label.textContent = format(v);
+      chart.append(label);
+    }
+    if (band) {
+      const top = y(Math.min(band.max, yMax)), bottom = y(Math.max(band.min, yMin));
+      if (bottom > top) chart.append(svg("rect", { class: "band", x: L, y: top, width: W - L - R, height: bottom - top }));
+    }
+    for (const [t, anchor] of [[from, "start"], [to, "end"]]) {
+      const label = svg("text", { class: "axis", x: x(t), y: H - 4, "text-anchor": anchor });
+      label.textContent = new Date(t).toLocaleDateString(undefined, to - from > 300 * 864e5
+        ? { month: "short", year: "numeric" } : { month: "short", day: "numeric" });
+      chart.append(label);
+    }
+    if (points.length > 1) {
+      chart.append(svg("polyline", { class: "line", points: points.map((p) => x(p.t) + "," + y(p.v)).join(" ") }));
+    }
+    if (markers || points.length === 1) {
+      for (const p of points) chart.append(svg("circle", { class: "dot", cx: x(p.t), cy: y(p.v), r: 4 }));
+    }
+
+    // Hover: the nearest point by time, with a crosshair and a tooltip.
+    const cross = svg("line", { class: "cross", y1: T, y2: H - B, visibility: "hidden" });
+    const focus = svg("circle", { class: "dot", r: 5, visibility: "hidden" });
+    chart.append(cross, focus);
+    const hit = svg("rect", { x: L, y: 0, width: W - L - R, height: H, fill: "transparent" });
+    chart.append(hit);
+    const tip = el("div", "tip");
+    wrap.append(chart, tip);
+
+    hit.addEventListener("pointermove", (event) => {
+      const box = chart.getBoundingClientRect();
+      const t = from + ((event.clientX - box.left) * (W / box.width) - L) / (W - L - R) * (to - from);
+      const p = points.reduce((best, q) => Math.abs(q.t - t) < Math.abs(best.t - t) ? q : best, points[0]);
+      const px = x(p.t), py = y(p.v);
+      for (const [k, v] of [["x1", px], ["x2", px]]) cross.setAttribute(k, v);
+      focus.setAttribute("cx", px); focus.setAttribute("cy", py);
+      cross.setAttribute("visibility", "visible"); focus.setAttribute("visibility", "visible");
+      tip.textContent = new Date(p.t).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric",
+        hour: "numeric", minute: "2-digit" }) + " · " + format(p.v) + (p.note ? " · " + p.note : "");
+      tip.style.display = "block";
+      const scale = box.width / W;
+      const left = Math.min(Math.max(px * scale - tip.offsetWidth / 2, 0), box.width - tip.offsetWidth);
+      tip.style.left = left + "px";
+      tip.style.top = (py * scale - 34 + head.offsetHeight) + "px";
+    });
+    hit.addEventListener("pointerleave", () => {
+      cross.setAttribute("visibility", "hidden"); focus.setAttribute("visibility", "hidden");
+      tip.style.display = "none";
+    });
+    return wrap;
+  }
+
+  const TREND_FIELDS = [
+    ["fc", "FC", (v) => round(v)], ["cc", "CC", (v) => round(v)], ["ph", "pH", (v) => v.toFixed(2)],
+    ["ta", "TA", (v) => Math.round(v)], ["cya", "CYA", (v) => Math.round(v)], ["ch", "CH", (v) => Math.round(v)],
+    ["salt", "Salt", (v) => Math.round(v)], ["bor", "Borate", (v) => Math.round(v)],
+  ];
+
+  function trendsSection(body) {
+    const wrap = el("div");
+    const ranges = el("div", "ranges");
+    const charts = el("div");
+    wrap.append(ranges, charts);
+    const toF = (c) => (body.tempUnits === 1 ? c : c * 9 / 5 + 32);
+    const tempFmt = (v) => v.toFixed(1) + (body.tempUnits === 1 ? " °C" : " °F");
+    const band = (key) => {
+      const t = (body.balance ? body.balance.targets : []).find((x) => x.key === key);
+      return t ? { min: t.min, max: t.max } : null;
+    };
+
+    const load = async (days) => {
+      for (const b of ranges.children) b.setAttribute("aria-pressed", String(Number(b.dataset.days) === days));
+      charts.replaceChildren(el("p", "none", "Loading…"));
+      const data = await fetch("trends?waterBody=" + encodeURIComponent(body.name) + "&days=" + days).then((r) => r.json());
+      // "All" starts at the first test rather than a century back.
+      const first = data.tests.length ? new Date(data.tests[0].takenAt).getTime() : Date.now();
+      const from = Math.max(new Date(data.since).getTime(), days >= 36500 ? first - 864e5 : 0), to = Date.now();
+      const out = [];
+
+      const series = (key, convert) => data.tests
+        .filter((t) => t[key] !== null && t[key] !== undefined)
+        .map((t) => ({ t: new Date(t.takenAt).getTime(), v: convert ? convert(t[key]) : t[key],
+          note: SOURCE_NAMES[t.source] || t.source }));
+      for (const [key, label, format] of TREND_FIELDS) {
+        const points = series(key);
+        if (points.length) out.push(lineChart({ title: label, points, band: band(key), format, markers: true, from, to }));
+      }
+      const temps = series("waterTempC", toF);
+      if (temps.length) out.push(lineChart({ title: "Water temp", points: temps, format: tempFmt, markers: true, from, to }));
+      if (!out.length) out.push(el("p", "none", "No tests in this range."));
+
+      const sensorCharts = [];
+      const sensor = (role, label, format, convert) => {
+        const s = data.samples[role];
+        if (!s || !s.length) return;
+        const points = s.map((p) => ({ t: new Date(p.at).getTime(), v: convert ? convert(p.value) : p.value }));
+        sensorCharts.push(lineChart({ title: label, points, format, markers: false,
+          from: Math.max(from, points[0].t), to }));
+      };
+      sensor("ph", "pH probe", (v) => v.toFixed(2));
+      sensor("orp", "ORP", (v) => Math.round(v) + " mV");
+      sensor("waterTemp", "Water temp (sensor)", tempFmt, toF);
+      sensor("salt", "Salt cell salt", (v) => Math.round(v));
+      sensor("filterPsi", "Filter pressure", (v) => v.toFixed(1) + " psi");
+      sensor("pumpWatts", "Pump power", (v) => Math.round(v) + " W");
+      if (sensorCharts.length) {
+        out.push(el("h3", "", "Controller sensors (hourly)"));
+        out.push(...sensorCharts);
+      }
+      charts.replaceChildren(...out);
+    };
+
+    for (const [label, days] of [["30 d", 30], ["90 d", 90], ["1 y", 365], ["All", 36500]]) {
+      const b = el("button", "", label);
+      b.type = "button";
+      b.dataset.days = days;
+      b.addEventListener("click", () => load(days));
+      ranges.appendChild(b);
+    }
+    load(90);
+    return wrap;
+  }
+
   function card(body) {
     const card = el("div", "card");
 
@@ -832,6 +1057,7 @@
     card.appendChild(section(body, "add", "Add a test", () => testForm(body)));
     card.appendChild(section(body, "chem", "Log a chemical", () => additionForm(body)));
     card.appendChild(section(body, "maint", "Log maintenance", () => maintenanceForm(body)));
+    card.appendChild(section(body, "trends", "Trends", () => trendsSection(body)));
     card.appendChild(section(body, "history", "Test history", () => historySection(body)));
     card.appendChild(section(body, "log", "Chemicals & maintenance", () => logSection(body)));
     card.appendChild(section(body, "settings", "Pool settings", () => settingsSection(body)));
