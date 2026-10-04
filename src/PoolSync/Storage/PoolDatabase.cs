@@ -630,6 +630,34 @@ public sealed class PoolDatabase
         return changed;
     }
 
+    public async Task<PoolSync.Ai.PoolAnalysis?> AnalysisAsync(string waterBody, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT at, model, text FROM analyses WHERE water_body = $body";
+        Add(command, "$body", waterBody);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        return await reader.ReadAsync(ct)
+            ? new PoolSync.Ai.PoolAnalysis(waterBody, Parse(reader.GetString(0)), reader.GetString(1), reader.GetString(2))
+            : null;
+    }
+
+    /// <summary>Keeps the latest analysis per water body.</summary>
+    public async Task SaveAnalysisAsync(PoolSync.Ai.PoolAnalysis analysis, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO analyses (water_body, at, model, text) VALUES ($body, $at, $model, $text)
+            ON CONFLICT (water_body) DO UPDATE SET at = excluded.at, model = excluded.model, text = excluded.text
+            """;
+        Add(command, "$body", analysis.WaterBody);
+        Add(command, "$at", Format(analysis.At));
+        Add(command, "$model", analysis.Model);
+        Add(command, "$text", analysis.Text);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     /// <summary>Row counts per table and source, for the status page footer and import results.</summary>
     public async Task<IReadOnlyDictionary<string, long>> CountsAsync(CancellationToken ct)
     {
@@ -750,6 +778,13 @@ public sealed class PoolDatabase
                 PRIMARY KEY (test_id, role)
             );
             CREATE INDEX IF NOT EXISTS comparisons_by_body_time ON sensor_comparisons (water_body, at);
+
+            CREATE TABLE IF NOT EXISTS analyses (
+                water_body TEXT PRIMARY KEY,
+                at TEXT NOT NULL,
+                model TEXT NOT NULL,
+                text TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS alerts (
                 key TEXT PRIMARY KEY,

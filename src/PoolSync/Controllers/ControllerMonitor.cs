@@ -300,7 +300,7 @@ public sealed class ControllerMonitor(
                 await database.InsertSamplesAsync(
                     EquipmentHealth.Hourly(points, start, oldest)
                         .Select(h => new SensorSample(waterBody.Name, role, sensor.Entity, h.Hour,
-                            ControllerSensors.Normalise(role, h.Value, sensor.Unit))),
+                            ControllerSensors.Normalise(role, h.Value, sensor.SourceUnit))),
                     ct);
                 oldest = start;
             }
@@ -419,7 +419,7 @@ public sealed class ControllerMonitor(
                 var values = points.Select(p => p.Number).OfType<double>().ToList();
                 if (values.Count > 0)
                 {
-                    return ControllerSensors.Normalise(sensor.Role, values.Average(), sensor.Unit);
+                    return ControllerSensors.Normalise(sensor.Role, values.Average(), sensor.SourceUnit);
                 }
             }
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)

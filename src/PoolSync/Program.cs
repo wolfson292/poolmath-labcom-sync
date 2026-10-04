@@ -43,6 +43,9 @@ builder.Services.AddSingleton<ControllerMonitor>();
 builder.Services.AddHttpClient(PoolSync.Weather.RainClient.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(20));
 builder.Services.AddSingleton<PoolSync.Weather.RainClient>();
 
+builder.Services.Configure<PoolSync.Ai.AiOptions>(builder.Configuration.GetSection(PoolSync.Ai.AiOptions.SectionName));
+builder.Services.AddSingleton<PoolSync.Ai.PoolAnalyst>();
+
 builder.Services.AddSingleton<PoolDatabase>();
 builder.Services.AddScoped<PoolMathImporter>();
 builder.Services.AddSingleton<SyncStatus>();
@@ -194,6 +197,24 @@ app.MapGet("/trends", async (string waterBody, int? days, PoolDatabase database,
     }
 
     return Results.Ok(new { since, tests, samples });
+});
+
+// --- AI analysis: Claude reads a water body's current state and recent history and recommends.
+
+app.MapGet("/analysis/{waterBody}", async (
+    string waterBody, PoolSync.Ai.PoolAnalyst analyst, IOptions<PoolSync.Ai.AiOptions> ai, CancellationToken ct) =>
+    Results.Ok(new { enabled = ai.Value.Configured, latest = await analyst.LatestAsync(waterBody, ct) }));
+
+app.MapPost("/analysis/{waterBody}", async (string waterBody, PoolSync.Ai.PoolAnalyst analyst, CancellationToken ct) =>
+{
+    try
+    {
+        return Results.Ok(await analyst.AnalyzeAsync(waterBody, ct));
+    }
+    catch (PoolSync.Ai.AnalysisUnavailableException ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
 });
 
 // --- Chemical additions, with a preview of what one would do to the water.

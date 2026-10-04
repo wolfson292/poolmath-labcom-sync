@@ -57,7 +57,27 @@
   #msg { color: var(--muted); font-size: .9rem; }
   #msg.bad { color: var(--bad); }
   #msg.ok { color: var(--ok); }
-  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }
+  nav.tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--line); margin-bottom: 1rem; overflow-x: auto; }
+  nav.tabs button {
+    background: none; color: var(--muted); border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+    padding: .55rem .9rem; font-weight: 600; white-space: nowrap; display: flex; gap: .4rem; align-items: center;
+  }
+  nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+  nav.tabs .count { font-size: .7rem; color: var(--warn); border: 1px solid currentColor; border-radius: 999px;
+    padding: 0 .35rem; line-height: 1.4; }
+  #bodies .card { max-width: 44rem; margin: 0 auto; }
+  .analysis { font-size: .9rem; line-height: 1.55; }
+  .analysis h4 { font-size: .95rem; margin: .9rem 0 .3rem; }
+  .analysis h4:first-child { margin-top: 0; }
+  .analysis ul, .analysis ol { margin: .3rem 0 .6rem; padding-left: 1.2rem; }
+  .analysis li { margin: .15rem 0; }
+  .analysis p { margin: .4rem 0; }
+  .analysis code { font-size: .85em; }
+  .analysis table { border-collapse: collapse; margin: .4rem 0 .7rem; font-size: .85rem; }
+  .analysis th, .analysis td { border-bottom: 1px solid var(--line); padding: .25rem .6rem .25rem 0; text-align: left; }
+  .ai-bar { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin-bottom: .6rem; }
+  .ai-bar button { padding: .4rem .9rem; font-size: .88rem; }
+  .ai-bar span { color: var(--muted); font-size: .8rem; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: .75rem; padding: 1rem 1.1rem; }
   .card h2 { font-size: 1.05rem; margin: 0 0 .15rem; }
   .card h2 a { color: var(--accent); text-decoration: none; }
@@ -156,7 +176,8 @@
     <span id="msg"></span>
   </div>
 
-  <div class="grid" id="bodies"></div>
+  <nav class="tabs" id="tabs" role="tablist"></nav>
+  <div id="bodies"></div>
 
   <footer id="foot"></footer>
 </main>
@@ -256,7 +277,7 @@
     const balance = body.balance;
     if (!balance) return frag;
 
-    frag.appendChild(el("h3", "", "To reach Pool Math's ideal levels"));
+    frag.appendChild(el("h3", "", "To reach ideal levels (TFP)"));
 
     if (balance.recommendations.length === 0) {
       const unknown = balance.targets.filter((t) => t.status === "unknown").map((t) => t.label);
@@ -1021,6 +1042,110 @@
     return wrap;
   }
 
+  // The open tab: from the URL, then the last one used, then the first.
+  let activeTab = decodeURIComponent(location.hash.slice(1)) || localStorage.getItem("poolsync-tab");
+
+  function warningCount(body) {
+    const c = body.controller;
+    const issues = c ? (c.issues || []).filter((i) => i.severity === "warning").length + (c.error ? 1 : 0) : 0;
+    return issues + (body.reminders || []).filter((r) => r.overdue).length;
+  }
+
+  // Minimal Markdown for the analysis: headings, bullets, numbered lists, bold, code. Text is
+  // escaped first, so nothing from the response can inject markup.
+  function markdown(text) {
+    const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const inline = (t) => esc(t).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/`([^`]+)`/g, "<code>$1</code>");
+    const out = [];
+    let list = null;
+    const close = () => { if (list) { out.push("</" + list + ">"); list = null; } };
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trimEnd();
+      let m;
+      // A table: a | row | followed by a |---| separator, then rows until the pipes stop.
+      if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+        close();
+        const cells = (row) => row.trim().replace(/^\||\|$/g, "").split("|").map((c) => inline(c.trim()));
+        out.push("<table><thead><tr>" + cells(line).map((c) => "<th>" + c + "</th>").join("") + "</tr></thead><tbody>");
+        i += 2;
+        for (; i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i]); i++) {
+          out.push("<tr>" + cells(lines[i]).map((c) => "<td>" + c + "</td>").join("") + "</tr>");
+        }
+        i--;
+        out.push("</tbody></table>");
+      } else if ((m = line.match(/^#{1,6}\s+(.*)$/))) { close(); out.push("<h4>" + inline(m[1]) + "</h4>"); }
+      else if ((m = line.match(/^\s*[-*]\s+(.*)$/))) {
+        if (list !== "ul") { close(); out.push("<ul>"); list = "ul"; }
+        out.push("<li>" + inline(m[1]) + "</li>");
+      } else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
+        if (list !== "ol") { close(); out.push("<ol>"); list = "ol"; }
+        out.push("<li>" + inline(m[1]) + "</li>");
+      } else if (!line.trim()) { close(); }
+      else { close(); out.push("<p>" + inline(line) + "</p>"); }
+    }
+    close();
+    return out.join("");
+  }
+
+  // Analyses survive the 30-second refresh: the latest per water body, and which are running.
+  const analyses = {};
+  const analysing = new Set();
+  const aiOpened = new Set();
+
+  function analysisSection(body) {
+    const wrap = el("div");
+    const bar = el("div", "ai-bar");
+    const button = el("button", "", "Analyze with AI");
+    button.type = "button";
+    const info = el("span");
+    const result = el("div", "analysis");
+    bar.append(button, info);
+    wrap.append(bar, result);
+
+    const show = () => {
+      const a = analyses[body.name];
+      button.disabled = analysing.has(body.name) || (a && a.enabled === false);
+      if (analysing.has(body.name)) {
+        info.textContent = "Analyzing current and recent data… this can take a minute.";
+      } else if (a && a.error) {
+        info.textContent = a.error;
+      } else if (a && a.latest) {
+        info.textContent = "Last analyzed " + ago(a.latest.at) + " · " + a.latest.model;
+      } else if (a && a.enabled === false) {
+        info.textContent = "Add an Anthropic API key (POOLSYNC_Ai__ApiKey) to enable this.";
+      } else {
+        info.textContent = "Reads this pool's tests, logs and sensors and recommends what to do next.";
+      }
+      result.innerHTML = a && a.latest ? markdown(a.latest.text) : "";
+    };
+
+    if (!analyses[body.name]) {
+      fetch("analysis/" + encodeURIComponent(body.name)).then((r) => r.json())
+        .then((r) => { analyses[body.name] = r; show(); })
+        .catch(() => {});
+    }
+
+    button.addEventListener("click", async () => {
+      analysing.add(body.name);
+      show();
+      try {
+        const res = await fetch("analysis/" + encodeURIComponent(body.name), { method: "POST" });
+        const r = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(r.error || res.status);
+        analyses[body.name] = { enabled: true, latest: r };
+      } catch (err) {
+        analyses[body.name] = { ...(analyses[body.name] || {}), error: "Analysis failed: " + err.message };
+      } finally {
+        analysing.delete(body.name);
+        show();
+      }
+    });
+
+    show();
+    return wrap;
+  }
+
   function card(body) {
     const card = el("div", "card");
 
@@ -1050,6 +1175,9 @@
 
     card.appendChild(readings(body));
     card.appendChild(balanceSection(body));
+    // Open the analysis by default the first time, but respect it being closed after that.
+    if (!aiOpened.has(body.name)) { aiOpened.add(body.name); openSections.add(body.name + "|ai"); }
+    card.appendChild(section(body, "ai", "AI analysis", () => analysisSection(body)));
 
     if (body.controller) {
       card.appendChild(section(body, "controller", "Controller", () => controllerSection(body)));
@@ -1086,8 +1214,34 @@
     mode.className = "badge " + (data.dryRun ? "dry" : "live");
     document.getElementById("interval").textContent = "every " + data.interval;
 
-    const grid = document.getElementById("bodies");
-    grid.replaceChildren(...(data.waterBodies || []).map(card));
+    const bodies = data.waterBodies || [];
+    if (!bodies.some((b) => b.name === activeTab)) activeTab = bodies.length ? bodies[0].name : null;
+
+    const tabs = document.getElementById("tabs");
+    tabs.replaceChildren(...bodies.map((b) => {
+      const tab = el("button");
+      tab.type = "button";
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", String(b.name === activeTab));
+      tab.appendChild(el("span", "", b.name));
+      const warnings = warningCount(b);
+      if (warnings) {
+        const count = el("span", "count", String(warnings));
+        count.title = warnings + " warning(s)";
+        tab.appendChild(count);
+      }
+      tab.addEventListener("click", () => {
+        activeTab = b.name;
+        localStorage.setItem("poolsync-tab", b.name);
+        history.replaceState(null, "", "#" + encodeURIComponent(b.name));
+        refresh(true);
+      });
+      return tab;
+    }));
+
+    const panel = document.getElementById("bodies");
+    const body = bodies.find((b) => b.name === activeTab);
+    panel.replaceChildren(...(body ? [card(body)] : []));
 
     const parts = ["Last sync " + ago(data.lastSuccessAt)];
     if (data.lastError) {

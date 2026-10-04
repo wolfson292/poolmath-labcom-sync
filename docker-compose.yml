@@ -42,6 +42,9 @@ services:
       POOLSYNC_HomeAssistant__0__Publish: ${POOLSYNC_HomeAssistant__0__Publish:-true}
       POOLSYNC_HomeAssistant__1__Url: ${POOLSYNC_HomeAssistant__1__Url:-}
       POOLSYNC_HomeAssistant__1__Token: ${POOLSYNC_HomeAssistant__1__Token:-}
+      # AI analysis: an Anthropic API key enables the "Analyze with AI" button on each pool.
+      POOLSYNC_Ai__ApiKey: ${POOLSYNC_Ai__ApiKey:-}
+      POOLSYNC_Ai__Model: ${POOLSYNC_Ai__Model:-claude-opus-5-5}
       # Product strengths the dosing advice is worked out for.
       POOLSYNC_Balance__ChlorinePercent: ${POOLSYNC_Balance__ChlorinePercent:-10}
       POOLSYNC_Balance__AcidPercent: ${POOLSYNC_Balance__AcidPercent:-31.45}

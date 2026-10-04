@@ -63,6 +63,8 @@ public class ControllerSensorsTests
         var temp = ControllerSensors.Resolve(Allaire, "pool_antenna").Single(r => r.Role == SensorRole.WaterTemp);
 
         Assert.Equal(28.06, temp.Value, precision: 2);
+        Assert.Equal("°C", temp.Unit);
+        Assert.Equal("°F", temp.SourceUnit);
     }
 
     [Fact]

@@ -28,7 +28,9 @@ public static class SensorRole
 
 /// <summary>A sensor role resolved to the entity that reports it, with its current value.</summary>
 /// <param name="Value">In the sensor's own unit, except water temperature, which is always °C.</param>
-public sealed record SensorReading(string Role, string Entity, string? Name, double Value, string? Unit);
+/// <param name="Unit">The unit of <paramref name="Value"/>: "°C" for water temperature, else the sensor's.</param>
+/// <param name="SourceUnit">The unit Home Assistant reports, for converting its history the same way.</param>
+public sealed record SensorReading(string Role, string Entity, string? Name, double Value, string? Unit, string? SourceUnit = null);
 
 /// <summary>A fault flag the controller is raising right now.</summary>
 public sealed record ControllerFault(string Entity, string Name);
@@ -78,7 +80,8 @@ public static class ControllerSensors
             if (reading?.Number is { } value)
             {
                 readings.Add(new SensorReading(
-                    role, reading.EntityId, reading.FriendlyName, Normalise(role, value, reading.Unit), reading.Unit));
+                    role, reading.EntityId, reading.FriendlyName, Normalise(role, value, reading.Unit),
+                    role == SensorRole.WaterTemp ? "°C" : reading.Unit, reading.Unit));
             }
         }
 
@@ -90,7 +93,7 @@ public static class ControllerSensors
             var fahrenheit = climate.NumberAttribute("current_temperature")!.Value;
             readings.Add(new SensorReading(
                 SensorRole.WaterTemp, climate.EntityId + "#current_temperature", climate.FriendlyName,
-                (fahrenheit - 32) * 5 / 9, "°F"));
+                (fahrenheit - 32) * 5 / 9, "°C", "°F"));
         }
 
         return readings;

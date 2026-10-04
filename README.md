@@ -239,6 +239,21 @@ service (`notify.all_devices`), once, then daily while they last. Each water bod
 recommendations as attributes) and current readings are published as `sensor.poolsync_<pool>_*`
 entities, refreshed every sync.
 
+## AI analysis
+
+Each water body has its own tab. In it, **Analyze with AI** sends that pool's current state and
+recent history to Claude (Claude Opus 5.5, adaptive thinking at high effort) and shows its
+recommendation: what matters most right now, what to retest before dosing, and what to watch. It
+sees exactly what the page has: settings, current readings with their sources and ages, CSI and the
+recommended doses, the last 40 tests, a year of chemical additions, recent maintenance, rain
+dilution, reminders, and the controller's sensors, warnings and probe comparisons. It has no tools
+and no other source, and it's told that tests outrank sensors.
+
+The latest analysis per pool is kept, so it's still there after a reload. A run takes about a minute
+and costs roughly $0.15–0.25 in API usage. Set `Ai:ApiKey` to enable it; `Ai:Model` picks the model.
+A request the model declines is re-served by a fallback model (server-side fallback) rather than
+coming back empty.
+
 ## Endpoints
 
 | Path      | Purpose                                                                    |
@@ -256,6 +271,8 @@ entities, refreshed every sync.
 | `GET/POST /maintenance`, `DELETE /maintenance/{id}` | Maintenance entries. |
 | `GET /chemicals` | The products and units the forms offer. |
 | `GET /trends?waterBody=Pool&days=90` | Tests in the range, and controller samples as hourly means. |
+| `GET /analysis/{waterBody}` | Whether AI analysis is enabled, and the latest one. |
+| `POST /analysis/{waterBody}` | Runs a new AI analysis (about a minute). 503 with a reason if it can't. |
 | `POST /sync` | Runs a sync immediately, writing sessions without waiting out `SessionSettleTime`. 200 with the number of logs written, 409 if a run is already in progress, 502 if the run failed. |
 
 The readings shown are the newest LabCOM holds, which is not always what has been synced — a water

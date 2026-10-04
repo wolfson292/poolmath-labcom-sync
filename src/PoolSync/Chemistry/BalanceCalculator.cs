@@ -113,7 +113,8 @@ public sealed class BalanceCalculator(BalanceOptions options)
         {
             var target = pool.FcTargetOverride ?? Math.Round(c * (pool.Swg ? 0.075 : 0.125) * 2) / 2;
             var min = Math.Round(c * (pool.Swg ? 0.05 : 0.075), 1);
-            targets.Add(Target(PoolMathFields.FreeChlorine, "FC", min, target + 3, target, fc));
+            // FC has no TFP upper limit short of SLAM level (40% of CYA), so that's the top of the range.
+            targets.Add(Target(PoolMathFields.FreeChlorine, "FC", min, Math.Max(target, Math.Round(c * 0.4, 1)), target, fc));
 
             if (fc is { } f && f < target)
             {

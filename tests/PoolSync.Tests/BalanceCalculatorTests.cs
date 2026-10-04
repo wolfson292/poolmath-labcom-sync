@@ -190,4 +190,14 @@ public class BalanceCalculatorTests
         Assert.Equal((100, 250, 150), (ch.Min, ch.Max, ch.Target));
         Assert.Equal("ok", cya.Status);
     }
+
+    [Fact]
+    public void Fc_is_only_high_past_slam_level()
+    {
+        var fc = Calculator.Calculate(Water(fc: 12, cya: 40), Pool(swg: false))
+            .Targets.Single(t => t.Key == PoolMathFields.FreeChlorine);
+
+        Assert.Equal(16, fc.Max);
+        Assert.Equal("ok", fc.Status);
+    }
 }
