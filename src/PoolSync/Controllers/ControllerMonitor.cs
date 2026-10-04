@@ -38,8 +38,22 @@ public sealed class ControllerMonitor(
     /// <summary>How long samples are kept; health checks look back 30 days.</summary>
     private static readonly TimeSpan SampleRetention = TimeSpan.FromDays(60);
 
-    /// <summary>How far back tests are paired with sensor history: about what HA's recorder keeps.</summary>
-    private static readonly TimeSpan ComparisonLookback = TimeSpan.FromDays(30);
+    /// <summary>
+    /// How far back tests are paired with sensor history. HA's recorder here keeps about 60 days; a
+    /// test older than what it has falls back to this service's own samples, or is skipped.
+    /// </summary>
+    private static readonly TimeSpan ComparisonLookback = TimeSpan.FromDays(60);
+
+    /// <summary>
+    /// How much equipment history to backfill from HA as hourly means, so the filter and pump checks
+    /// have a baseline from the start instead of after days of sampling.
+    /// </summary>
+    private static readonly TimeSpan Backfill = TimeSpan.FromDays(14);
+
+    /// <summary>Days of backfill fetched per role per run, keeping each run light.</summary>
+    private const int BackfillDaysPerRun = 4;
+
+    private static readonly string[] BackfillRoles = [SensorRole.FilterPsi, SensorRole.PumpRpm, SensorRole.PumpWatts];
 
     /// <summary>Caps HA history lookups per run, so a first run over a month of tests stays gentle.</summary>
     private const int ComparisonsPerRun = 20;
@@ -163,6 +177,7 @@ public sealed class ControllerMonitor(
 
         await database.InsertSamplesAsync(
             readings.Select(r => new SensorSample(waterBody.Name, r.Role, r.Entity, now, r.Value)), ct);
+        await BackfillAsync(waterBody, instance, byRole, now, ct);
 
         await CompareAsync(waterBody, instance, tests, byRole, states, now, ct);
         var comparisons = await LatestComparisonsAsync(waterBody, settings, ct);
@@ -208,8 +223,14 @@ public sealed class ControllerMonitor(
         FcPrediction? fc = null;
         if (byRole.ContainsKey(SensorRole.Orp) && fcMinimum is { } minimum)
         {
-            fc = await PredictFcAsync(waterBody, cya, minimum, now, ct);
-            if (fc.Estimate is { } estimate && estimate < minimum)
+            var ph = byRole.TryGetValue(SensorRole.Ph, out var phProbe) ? phProbe.Value
+                : tests.Where(t => t.Ph is >= 6 and <= 9).OrderByDescending(t => t.TakenAt).FirstOrDefault()?.Ph ?? 7.53;
+            fc = await PredictFcAsync(waterBody, cya, minimum, ph, now, ct);
+            if (fc.ProbeSuspect)
+            {
+                issues.Add(new HealthIssue($"{waterBody.Name}:orp-probe", HealthIssue.Warning, $"{waterBody.Name}: {fc.Note}"));
+            }
+            else if (fc.Estimate is { } estimate && estimate < minimum)
             {
                 issues.Add(new HealthIssue($"{waterBody.Name}:fc-low", HealthIssue.Warning,
                     $"{waterBody.Name}: FC is about {estimate:0.#} going by ORP, below the {minimum:0.#} minimum. Add chlorine."));
@@ -227,17 +248,63 @@ public sealed class ControllerMonitor(
 
     /// <summary>Calibrates ORP against the last 90 days of FC tests, then reads the last 6 hours of ORP through it.</summary>
     private async Task<FcPrediction> PredictFcAsync(
-        WaterBodyOptions waterBody, double? cya, double minimum, DateTimeOffset now, CancellationToken ct)
+        WaterBodyOptions waterBody, double? cya, double minimum, double ph, DateTimeOffset now, CancellationToken ct)
     {
         var points = (await database.ComparisonsAsync(waterBody.Name, 500, ct))
-            .Where(c => c.Role == SensorRole.Orp && c.At >= now.AddDays(-90))
+            .Where(c => c.Role == SensorRole.OrpCalibration && c.At >= now.AddDays(-90))
             .Select(c => (Ratio: c.TestValue, Orp: c.SensorValue))
             .ToList();
         var calibration = FcFromOrp.Fit(points);
+        var line = FcFromOrp.Line(points);
         var recent = (await database.SamplesAsync(waterBody.Name, SensorRole.Orp, now.AddHours(-6), ct))
             .Select(s => (s.At, s.Value))
             .ToList();
-        return FcFromOrp.Predict(calibration, points.Count, cya, minimum, recent);
+        return FcFromOrp.Predict(calibration, points.Count, cya, minimum, recent, ph, line);
+    }
+
+    /// <summary>
+    /// Fills in the equipment roles' history from HA, working back from the oldest sample held until
+    /// <see cref="Backfill"/> is covered. Samples are hourly means stamped on the hour, the same for
+    /// every role, so pressure, speed and power from the same hour pair up.
+    /// </summary>
+    private async Task BackfillAsync(
+        WaterBodyOptions waterBody, int instance, IReadOnlyDictionary<string, SensorReading> byRole, DateTimeOffset now,
+        CancellationToken ct)
+    {
+        var goal = now - Backfill;
+        foreach (var role in BackfillRoles)
+        {
+            if (!byRole.TryGetValue(role, out var sensor) || sensor.Entity.Contains('#'))
+            {
+                continue;
+            }
+
+            var held = await database.SamplesAsync(waterBody.Name, role, goal.AddDays(-1), ct);
+            // Everything after the oldest hourly backfill is held; the first run starts from now.
+            var oldest = held.Where(s => s.At.Minute == 0 && s.At.Second == 0).Select(s => (DateTimeOffset?)s.At).Min() ?? now;
+
+            for (var day = 0; day < BackfillDaysPerRun && oldest > goal; day++)
+            {
+                var start = oldest.AddDays(-1) < goal ? goal : oldest.AddDays(-1);
+                IReadOnlyList<HaHistoryPoint> points;
+                try
+                {
+                    points = await homeAssistant.HistoryAsync(instance, sensor.Entity, start, oldest, ct);
+                }
+                catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+                {
+                    logger.LogDebug("Backfill of {Entity} failed: {Message}", sensor.Entity, ex.Message);
+                    break;
+                }
+
+                await database.InsertSamplesAsync(
+                    EquipmentHealth.Hourly(points, start, oldest)
+                        .Select(h => new SensorSample(waterBody.Name, role, sensor.Entity, h.Hour,
+                            ControllerSensors.Normalise(role, h.Value, sensor.Unit))),
+                    ct);
+                oldest = start;
+            }
+        }
     }
 
     /// <summary>
@@ -310,10 +377,11 @@ public sealed class ControllerMonitor(
 
         foreach (var test in tests.Where(t => t.TakenAt >= now - ComparisonLookback && t.TakenAt <= now.AddMinutes(-10)))
         {
-            foreach (var role in new[] { SensorRole.Ph, SensorRole.Salt, SensorRole.WaterTemp, SensorRole.Orp })
+            foreach (var role in new[] { SensorRole.Ph, SensorRole.Salt, SensorRole.WaterTemp, SensorRole.OrpCalibration })
             {
-                var testValue = role == SensorRole.Orp ? FcOverCya(test, tests) : TestValue(test, role);
-                if (!byRole.TryGetValue(role, out var sensor) || testValue is null
+                var testValue = role == SensorRole.OrpCalibration ? ActiveChlorine(test, tests) : TestValue(test, role);
+                var sensorRole = role == SensorRole.OrpCalibration ? SensorRole.Orp : role;
+                if (!byRole.TryGetValue(sensorRole, out var sensor) || testValue is null
                     || done.Contains(test.Id + "|" + role))
                 {
                     continue;
@@ -373,7 +441,7 @@ public sealed class ControllerMonitor(
         var all = await database.ComparisonsAsync(waterBody.Name, 200, ct);
         // ORP pairs calibrate the FC estimate; there's no test value to show a difference against.
         return all
-            .Where(c => c.Role != SensorRole.Orp)
+            .Where(c => c.Role is not (SensorRole.Orp or SensorRole.OrpCalibration))
             .GroupBy(c => c.Role)
             .Select(g => g.First())
             .Select(c =>
@@ -396,19 +464,29 @@ public sealed class ControllerMonitor(
             .ToList();
     }
 
-    /// <summary>A test's FC over the CYA in force at the time (the newest CYA test up to then).</summary>
-    public static double? FcOverCya(TestRecord test, IReadOnlyList<TestRecord> tests)
+    /// <summary>
+    /// A test's active chlorine for calibrating ORP: FC over the CYA in force at the time, scaled for
+    /// the pH at the time (each the newest believable test up to then if this test lacks it). A CYA
+    /// under 10 is treated as a misread, since the ratio is meaningless there.
+    /// </summary>
+    public static double? ActiveChlorine(TestRecord test, IReadOnlyList<TestRecord> tests)
     {
-        if (test.Fc is not { } fc)
+        if (test.Fc is not (> 0 and <= 60) || test.Ph is null && test.Cya is null && test.Fc is null)
         {
             return null;
         }
 
-        var cya = test.Cya ?? tests
-            .Where(t => t.Cya is > 0 and <= 300 && t.TakenAt <= test.TakenAt)
-            .OrderByDescending(t => t.TakenAt)
-            .FirstOrDefault()?.Cya;
-        return cya is > 0 && fc is >= 0 and <= 60 ? fc / cya : null;
+        double? Latest(Func<TestRecord, double?> value, double min, double max) =>
+            value(test) is { } own && own >= min && own <= max ? own
+            : tests.Where(t => value(t) is { } v && v >= min && v <= max && t.TakenAt <= test.TakenAt)
+                .OrderByDescending(t => t.TakenAt)
+                .Select(value)
+                .FirstOrDefault();
+
+        var cya = Latest(t => t.Cya, 10, 300);
+        // Above 8.6 a pH reading is usually a photometer's over-range marker, not a measurement.
+        var ph = Latest(t => t.Ph, 6, 8.6);
+        return cya is { } c && ph is { } p ? FcFromOrp.Active(test.Fc.Value, c, p) : null;
     }
 
     public static double? TestValue(TestRecord test, string role) => role switch

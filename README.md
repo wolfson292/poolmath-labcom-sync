@@ -214,7 +214,13 @@ that moment, and ORP is fitted against log(FC / CYA) for that pool over the last
 there are at least three such tests spread across different FC levels and the fit holds (R² ≥ 0.5),
 the card shows FC estimated from live ORP, its trend over the last 6 hours, and when it will reach
 the minimum, with a warning if that's within 6 hours or already past. Until then it says how many
-more tests it needs.
+more tests it needs. The fit accounts for pH, since less of the chlorine is active as pH rises, and
+skips tests whose CYA (under 10) or pH (over 8.6) look like misreads. If the tests are well spread
+but ORP reads higher with less chlorine, the probe is flagged for cleaning or calibration.
+
+Tests are paired with HA's history for as far back as its recorder keeps (about 60 days here). The
+equipment checks get a head start the same way: two weeks of filter pressure, pump speed and pump
+power are backfilled from HA as hourly means, a few days per sync.
 
 **Rain dilution.** Each pool has a location (filled in from its controller's Home Assistant) and a
 surface area (from the controller, or estimated from volume; a spa is assumed covered). Daily rain

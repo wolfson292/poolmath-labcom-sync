@@ -7,6 +7,12 @@ public static class SensorRole
 {
     public const string Ph = "ph";
     public const string Orp = "orp";
+
+    /// <summary>
+    /// Not a sensor: the comparison role pairing ORP with a test's pH-adjusted FC/CYA, used to
+    /// calibrate the FC estimate. (An earlier "orp" pairing without pH is ignored.)
+    /// </summary>
+    public const string OrpCalibration = "orpActive";
     public const string WaterTemp = "waterTemp";
     public const string Salt = "salt";
     public const string FilterPsi = "filterPsi";

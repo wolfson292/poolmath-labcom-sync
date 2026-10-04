@@ -112,7 +112,8 @@ public class FcFromOrpTests
         var fit = FcFromOrp.Fit(points)!;
 
         Assert.Equal(60, fit.B, precision: 3);
-        Assert.Equal(6, FcFromOrp.FcAt(fit, Orp(0.1), 60), precision: 3);
+        // At pH 7.53, the reference, a tenth of 60 is 6 times the active factor's inverse of 2.
+        Assert.Equal(12, FcFromOrp.FcAt(fit, Orp(0.1), 60, 7.53), precision: 3);
     }
 
     [Fact]
@@ -137,7 +138,8 @@ public class FcFromOrpTests
             .Select(i => (Now.AddHours(-4 + i * 0.25), Orp((6 - 2 + (16 - i) * 0.125) / 60)))
             .ToList();
 
-        var prediction = FcFromOrp.Predict(fit, 4, 60, minimum: 3, recent);
+        // ORP here encodes FC/CYA directly, so read it back at a pH where the active factor is ~1.
+        var prediction = FcFromOrp.Predict(fit, 4, 60, minimum: 3, recent, ph: 5);
 
         Assert.Equal(4, prediction.Estimate!.Value, precision: 1);
         Assert.InRange(prediction.PerHour!.Value, -0.6, -0.4);
@@ -151,5 +153,24 @@ public class FcFromOrpTests
 
         Assert.Null(prediction.Estimate);
         Assert.Contains("2 more", prediction.Note);
+    }
+
+    [Fact]
+    public void Higher_ph_means_less_active_chlorine_for_the_same_fc()
+    {
+        Assert.Equal(0.5, FcFromOrp.ActiveFactor(7.53), precision: 6);
+        Assert.True(FcFromOrp.Active(6, 60, 8.3) < FcFromOrp.Active(6, 60, 7.5) / 3);
+    }
+
+    [Fact]
+    public void An_orp_probe_reading_backwards_is_called_out()
+    {
+        var points = new List<(double, double)> { (0.01, 699), (0.024, 666), (0.035, 674), (0.039, 668) };
+
+        var prediction = FcFromOrp.Predict(FcFromOrp.Fit(points), points.Count, 22, 1.1, [], 7.6, FcFromOrp.Line(points));
+
+        Assert.Null(prediction.Estimate);
+        Assert.Contains("ORP probe probably needs cleaning", prediction.Note);
+        Assert.True(prediction.ProbeSuspect);
     }
 }

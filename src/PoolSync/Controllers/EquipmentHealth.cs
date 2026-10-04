@@ -110,6 +110,51 @@ public static class EquipmentHealth
         };
     }
 
+    /// <summary>
+    /// Hourly means from HA history. HA records a state only when it changes, so an hour with no
+    /// change carries the value in force, which HA reports as the first point of the window.
+    /// </summary>
+    public static IReadOnlyList<(DateTimeOffset Hour, double Value)> Hourly(
+        IReadOnlyList<PoolSync.HomeAssistant.HaHistoryPoint> points, DateTimeOffset start, DateTimeOffset end)
+    {
+        var numeric = points.Where(p => p.Number is not null).OrderBy(p => p.At).ToList();
+        var hours = new List<(DateTimeOffset, double)>();
+        double? current = null;
+        var index = 0;
+
+        var hour = new DateTimeOffset(start.UtcDateTime.Year, start.UtcDateTime.Month, start.UtcDateTime.Day,
+            start.UtcDateTime.Hour, 0, 0, TimeSpan.Zero);
+        for (; hour < end; hour = hour.AddHours(1))
+        {
+            var inHour = new List<double>();
+            while (index < numeric.Count && numeric[index].At < hour.AddHours(1))
+            {
+                if (numeric[index].At < hour)
+                {
+                    current = numeric[index].Number;
+                }
+                else
+                {
+                    inHour.Add(numeric[index].Number!.Value);
+                    current = numeric[index].Number;
+                }
+
+                index++;
+            }
+
+            if (inHour.Count > 0)
+            {
+                hours.Add((hour, inHour.Average()));
+            }
+            else if (current is { } carried)
+            {
+                hours.Add((hour, carried));
+            }
+        }
+
+        return hours;
+    }
+
     /// <summary>Each task with a reminder: when it was last done and when it's next due.</summary>
     public static IReadOnlyList<Reminder> Reminders(
         IEnumerable<MaintenanceRecord> maintenance, PoolSettings settings, DateTimeOffset now)

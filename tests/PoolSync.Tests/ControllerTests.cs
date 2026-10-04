@@ -1,4 +1,5 @@
 using System.Text.Json;
+using PoolSync.Chemistry;
 using PoolSync.Configuration;
 using PoolSync.Controllers;
 using PoolSync.HomeAssistant;
@@ -195,5 +196,34 @@ public class EquipmentHealthTests
     {
         Assert.True(new PoolSettings { Swg = true }.WithCellReminder().ReminderDays.ContainsKey(MaintenanceTasks.CleanedCell));
         Assert.False(new PoolSettings { Swg = false }.WithCellReminder().ReminderDays.ContainsKey(MaintenanceTasks.CleanedCell));
+    }
+
+    [Fact]
+    public void Hourly_backfill_carries_the_value_through_quiet_hours()
+    {
+        var start = new DateTimeOffset(2026, 9, 20, 0, 0, 0, TimeSpan.Zero);
+        HaHistoryPoint[] points =
+        [
+            new(start.AddHours(-3), "2000"),
+            new(start.AddHours(2).AddMinutes(10), "3000"),
+            new(start.AddHours(2).AddMinutes(40), "2500"),
+        ];
+
+        var hourly = EquipmentHealth.Hourly(points, start, start.AddHours(5));
+
+        Assert.Equal([2000.0, 2000, 2750, 2500, 2500], hourly.Select(h => h.Value));
+        Assert.Equal(start.AddHours(4), hourly[^1].Hour);
+    }
+
+    [Fact]
+    public void A_misread_cya_is_not_used_to_calibrate_orp()
+    {
+        var at = new DateTimeOffset(2026, 8, 24, 14, 0, 0, TimeSpan.Zero);
+        var earlier = new TestRecord { WaterBody = "Allaire", TakenAt = at.AddDays(-5), Source = "poolmath", Cya = 40, Ph = 7.5 };
+        var test = new TestRecord { WaterBody = "Allaire", TakenAt = at, Source = "poolmath", Fc = 0.61, Cya = 1.08, Ph = 7.51 };
+
+        var active = ControllerMonitor.ActiveChlorine(test, [earlier, test]);
+
+        Assert.Equal(FcFromOrp.Active(0.61, 40, 7.51), active!.Value, precision: 9);
     }
 }
